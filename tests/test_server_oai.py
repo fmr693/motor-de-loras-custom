@@ -1,0 +1,628 @@
+"""
+tests/test_server_oai.py
+========================
+Tests del endpoint OpenAI-compatible /v1/chat/completions (tarea A,
+auditoría 10 junio 2026):
+
+  1. Logging de interacciones en modo no-stream y stream (SSE)
+  2. El `id` OpenAI (chatcmpl-...) es el interaction_id del log
+     → POST /feedback funciona con él (cierra el circuito DPO)
+  3. Usage real de llama-cpp (no estimación chars//4)
+  4. content como lista de partes OpenAI (antes devolvía 422)
+  5. Regresión: /chat/session sigue logueando con session_id/turn
+
+No requiere modelo real: usa un stub de llama-cpp inyectado en _state.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from fastapi.testclient import TestClient
+
+import motor.server as server
+from motor.server import create_app, _oai_content_to_text
+
+
+# ---------------------------------------------------------------------------
+# Stub de llama-cpp-python
+# ---------------------------------------------------------------------------
+
+FAKE_TOOL_CALL = {
+    "id": "call_abc123",
+    "type": "function",
+    "function": {"name": "file_organize", "arguments": '{"path": "~/Descargas"}'},
+}
+
+
+class FakeLlama:
+    """Imita Llama.create_chat_completion en modo stream, no-stream y tools."""
+
+    def __init__(self, reply: str = "Hola mundo"):
+        self.reply = reply
+        self.last_kwargs: dict = {}
+
+    def create_chat_completion(self, messages, stream=False, **kw):
+        self.last_kwargs = dict(kw, messages=messages, stream=stream)
+        if kw.get("tools"):
+            # Simula que el modelo decide llamar a una herramienta
+            return {
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [FAKE_TOOL_CALL],
+                    },
+                    "finish_reason": "tool_calls",
+                }],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28},
+            }
+        if stream:
+            def gen():
+                yield {"choices": [{"delta": {"role": "assistant"}, "finish_reason": None}]}
+                # Partir la respuesta en 2 chunks de contenido
+                mid = len(self.reply) // 2
+                yield {"choices": [{"delta": {"content": self.reply[:mid]}, "finish_reason": None}]}
+                yield {"choices": [{"delta": {"content": self.reply[mid:]}, "finish_reason": None}]}
+                yield {"choices": [{"delta": {}, "finish_reason": "stop"}]}
+            return gen()
+        return {
+            "choices": [{
+                "message": {"role": "assistant", "content": self.reply},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+
+
+# ---------------------------------------------------------------------------
+# Fixture: servidor en modo GGUF falso con log en tmp_path
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def client(tmp_path):
+    st = server._state
+    saved = {
+        "model": st.model, "llama_model": st.llama_model, "is_gguf": st.is_gguf,
+        "model_path": st.model_path, "api_key": st.api_key,
+        "interaction_log_path": st.interaction_log_path, "sessions": st.sessions,
+    }
+    st.model = None
+    st.llama_model = FakeLlama()
+    st.is_gguf = True
+    st.model_path = "modelos/gemma-test.gguf"
+    st.api_key = None
+    st.interaction_log_path = str(tmp_path / "interaction_log.jsonl")
+    st.sessions = {}
+    try:
+        yield TestClient(create_app())
+    finally:
+        for k, v in saved.items():
+            setattr(st, k, v)
+
+
+def _read_log() -> list[dict]:
+    path = Path(server._state.interaction_log_path)
+    if not path.exists():
+        return []
+    return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+
+
+# ---------------------------------------------------------------------------
+# 1. No-stream: respuesta + usage real + log
+# ---------------------------------------------------------------------------
+
+class TestNoStream:
+    def test_respuesta_y_usage_real(self, client):
+        r = client.post("/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "¿Quién eres?"}],
+        })
+        assert r.status_code == 200
+        body = r.json()
+        assert body["choices"][0]["message"]["content"] == "Hola mundo"
+        assert body["choices"][0]["finish_reason"] == "stop"
+        # Usage real del stub, no chars//4
+        assert body["usage"] == {
+            "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15,
+        }
+        assert body["id"].startswith("chatcmpl-")
+
+    def test_loguea_interaccion(self, client):
+        r = client.post("/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "organiza mis descargas"}],
+        })
+        entries = _read_log()
+        assert len(entries) == 1
+        e = entries[0]
+        assert e["id"] == r.json()["id"]          # id OpenAI == interaction_id
+        assert e["user_msg"] == "organiza mis descargas"
+        assert e["assistant"] == "Hola mundo"
+        assert e["feedback"] is None
+        assert e["endpoint"] == "v1/chat/completions"
+        assert e["model"] == "gemma-test.gguf"
+
+    def test_user_msg_es_ultimo_mensaje_usuario(self, client):
+        client.post("/v1/chat/completions", json={
+            "messages": [
+                {"role": "user", "content": "primera pregunta"},
+                {"role": "assistant", "content": "primera respuesta"},
+                {"role": "user", "content": "segunda pregunta"},
+            ],
+        })
+        assert _read_log()[0]["user_msg"] == "segunda pregunta"
+
+
+# ---------------------------------------------------------------------------
+# 2. Streaming SSE: chunks + log en finally
+# ---------------------------------------------------------------------------
+
+class TestStream:
+    def test_sse_y_log(self, client):
+        with client.stream("POST", "/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "hola"}],
+            "stream": True,
+        }) as r:
+            assert r.status_code == 200
+            assert r.headers["content-type"].startswith("text/event-stream")
+            raw = "".join(r.iter_text())
+
+        datas = [l[len("data: "):] for l in raw.splitlines() if l.startswith("data: ")]
+        assert datas[-1] == "[DONE]"
+        chunks = [json.loads(d) for d in datas[:-1]]
+        text = "".join(
+            c["choices"][0]["delta"].get("content", "") for c in chunks
+        )
+        assert text == "Hola mundo"
+
+        entries = _read_log()
+        assert len(entries) == 1
+        e = entries[0]
+        assert e["assistant"] == "Hola mundo"
+        assert e["user_msg"] == "hola"
+        assert e["finish_reason"] == "stop"
+        assert e["id"] == chunks[0]["id"]          # id de los chunks == log
+
+
+# ---------------------------------------------------------------------------
+# 3. Circuito de feedback: id OpenAI → POST /feedback → DPO-ready
+# ---------------------------------------------------------------------------
+
+class TestFeedbackRoundtrip:
+    def test_feedback_con_id_openai(self, client):
+        r = client.post("/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "filtra mis correos"}],
+        })
+        chat_id = r.json()["id"]
+
+        fb = client.post("/feedback", json={"interaction_id": chat_id, "rating": 1})
+        assert fb.status_code == 200
+        assert fb.json()["updated"] is True
+
+        e = _read_log()[0]
+        assert e["feedback"] == 1
+        # Campos que DPOBuilder necesita para formar pares
+        assert e["user_msg"] and e["assistant"]
+
+
+# ---------------------------------------------------------------------------
+# 4. content flexible (lista de partes / None)
+# ---------------------------------------------------------------------------
+
+class TestContentParts:
+    def test_content_lista_de_partes(self, client):
+        r = client.post("/v1/chat/completions", json={
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "hola"},
+                    {"type": "text", "text": "mundo"},
+                ],
+            }],
+        })
+        assert r.status_code == 200
+        assert _read_log()[0]["user_msg"] == "hola\nmundo"
+
+    def test_content_none_tolerado(self, client):
+        r = client.post("/v1/chat/completions", json={
+            "messages": [
+                {"role": "assistant", "content": None},
+                {"role": "user", "content": "hola"},
+            ],
+        })
+        assert r.status_code == 200
+
+    def test_normalizador_unitario(self):
+        assert _oai_content_to_text("texto") == "texto"
+        assert _oai_content_to_text(None) == ""
+        assert _oai_content_to_text(
+            [{"type": "text", "text": "a"}, {"type": "image_url", "image_url": {}}]
+        ) == "a"
+        assert _oai_content_to_text(["a", "b"]) == "a\nb"
+
+
+# ---------------------------------------------------------------------------
+# 5. Tool-calling nativo (tarea B): tools llegan a llama-cpp y
+#    tool_calls vuelven al cliente
+# ---------------------------------------------------------------------------
+
+TOOLS = [{
+    "type": "function",
+    "function": {
+        "name": "file_organize",
+        "description": "Organiza archivos por tipo",
+        "parameters": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+        },
+    },
+}]
+
+
+class TestToolCalling:
+    def test_tools_se_pasan_a_llama(self, client):
+        r = client.post("/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "organiza mis descargas"}],
+            "tools": TOOLS,
+            "tool_choice": "auto",
+        })
+        assert r.status_code == 200
+        fake = server._state.llama_model
+        assert fake.last_kwargs["tools"] == TOOLS
+        assert fake.last_kwargs["tool_choice"] == "auto"
+
+    def test_respuesta_con_tool_calls(self, client):
+        r = client.post("/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "organiza mis descargas"}],
+            "tools": TOOLS,
+        })
+        choice = r.json()["choices"][0]
+        assert choice["finish_reason"] == "tool_calls"
+        assert choice["message"]["content"] is None
+        assert choice["message"]["tool_calls"] == [FAKE_TOOL_CALL]
+        # usage real del stub
+        assert r.json()["usage"]["total_tokens"] == 28
+
+    def test_historial_con_tool_calls_no_da_422(self, client):
+        """Segunda vuelta del loop agéntico: el historial incluye la tool
+        call del assistant y el resultado con role='tool'."""
+        r = client.post("/v1/chat/completions", json={
+            "messages": [
+                {"role": "user", "content": "organiza mis descargas"},
+                {"role": "assistant", "content": None, "tool_calls": [FAKE_TOOL_CALL]},
+                {"role": "tool", "tool_call_id": "call_abc123",
+                 "name": "file_organize", "content": "12 archivos movidos"},
+            ],
+        })
+        assert r.status_code == 200
+        # Los campos de tool llegan íntegros al modelo (el servidor inyecta
+        # un system prompt en el índice 0, así que buscamos por rol)
+        sent = server._state.llama_model.last_kwargs["messages"]
+        asst = next(m for m in sent if m["role"] == "assistant")
+        tool = next(m for m in sent if m["role"] == "tool")
+        assert asst["tool_calls"] == [FAKE_TOOL_CALL]
+        assert tool["tool_call_id"] == "call_abc123"
+        assert tool["content"] == "12 archivos movidos"
+
+    def test_stream_con_tools_emite_chunk_completo(self, client):
+        with client.stream("POST", "/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "organiza mis descargas"}],
+            "tools": TOOLS,
+            "stream": True,
+        }) as r:
+            assert r.status_code == 200
+            raw = "".join(r.iter_text())
+
+        datas = [l[len("data: "):] for l in raw.splitlines() if l.startswith("data: ")]
+        assert datas[-1] == "[DONE]"
+        chunks = [json.loads(d) for d in datas[:-1]]
+        # Primer chunk: tool_calls completas (con index); último: finish_reason
+        delta = chunks[0]["choices"][0]["delta"]
+        assert delta["tool_calls"][0]["function"]["name"] == "file_organize"
+        assert delta["tool_calls"][0]["index"] == 0
+        assert chunks[-1]["choices"][0]["finish_reason"] == "tool_calls"
+
+        # Y la interacción queda logueada con las tool_calls
+        e = _read_log()[0]
+        assert e["finish_reason"] == "tool_calls"
+        assert e["tool_calls"][0]["id"] == "call_abc123"
+
+    def test_log_no_stream_incluye_tool_calls(self, client):
+        client.post("/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "organiza mis descargas"}],
+            "tools": TOOLS,
+        })
+        e = _read_log()[0]
+        assert e["tool_calls"] == [FAKE_TOOL_CALL]
+        assert e["assistant"] == ""        # tool call pura: sin texto
+
+
+# ---------------------------------------------------------------------------
+# 5-bis. Clamp de temperatura consciente de familia (ficha oficial Gemma 4:
+#        temperature=1.0; Qwen Q4: >0.7 incoherente)
+# ---------------------------------------------------------------------------
+
+class TestModelNullTolerado:
+    def test_model_null_no_da_422(self, client):
+        """El Deep Research de Odysseus sondea con model=null — el 422
+        resultante mataba la investigación en segundo plano (12-jun-2026)."""
+        r = client.post("/v1/chat/completions", json={
+            "model": None,
+            "messages": [{"role": "user", "content": "ping"}],
+        })
+        assert r.status_code == 200
+        assert r.json()["choices"][0]["message"]["content"]
+
+
+class TestMaxTokensDefault:
+    """max_tokens ausente o 0 → 2048 (el default 512 cortaba respuestas
+    largas a media frase — visto en vivo con Odysseus, finish=length)."""
+
+    def test_ausente_usa_2048(self, client):
+        client.post("/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "hola"}],
+        })
+        assert server._state.llama_model.last_kwargs["max_tokens"] == 2048
+
+    def test_cero_usa_2048(self, client):
+        client.post("/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "hola"}],
+            "max_tokens": 0,
+        })
+        assert server._state.llama_model.last_kwargs["max_tokens"] == 2048
+
+    def test_explicito_se_respeta(self, client):
+        client.post("/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "hola"}],
+            "max_tokens": 100,
+        })
+        assert server._state.llama_model.last_kwargs["max_tokens"] == 100
+
+
+class TestTemperatureClamp:
+    def test_gemma_permite_temperatura_oficial_1(self, client):
+        client.post("/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "hola"}],
+            "temperature": 1.0,
+        })
+        # model_path del fixture es gemma-test.gguf → familia gemma → sin capar
+        assert server._state.llama_model.last_kwargs["temperature"] == 1.0
+
+    def test_familia_no_gemma_capa_a_07(self, client):
+        server._state.model_path = "modelos/Qwen2.5-7B-Instruct-q4_k_m.gguf"
+        client.post("/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "hola"}],
+            "temperature": 1.0,
+        })
+        assert server._state.llama_model.last_kwargs["temperature"] == 0.7
+
+
+# ---------------------------------------------------------------------------
+# 5-ter. Regresión de integración: la forma EXACTA que envía Odysseus en
+#        modo agente. Guarda nuestro lado pase lo que pase con Odysseus —
+#        el "tema herramientas" (12-jun) fue siempre de su lado, no del nuestro.
+# ---------------------------------------------------------------------------
+
+# Multi-tool como las arma Odysseus (FUNCTION_TOOL_SCHEMAS + tool_choice)
+ODYSSEUS_TOOLS = [
+    {"type": "function", "function": {"name": "web_search",
+        "description": "Search the web", "parameters": {"type": "object",
+        "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
+    {"type": "function", "function": {"name": "bash",
+        "description": "Run a shell command", "parameters": {"type": "object",
+        "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
+    {"type": "function", "function": {"name": "note_save",
+        "description": "Save a note", "parameters": {"type": "object",
+        "properties": {"title": {"type": "string"}, "body": {"type": "string"}},
+        "required": ["title", "body"]}}},
+]
+
+
+class TestOdysseusIntegrationShape:
+    """La petición que manda Odysseus en modo agente no debe romperse nunca."""
+
+    def test_ronda1_multitool_stream_devuelve_tool_calls(self, client):
+        """Ronda 1: system propio de Odysseus + user + N tools + stream + tool_choice."""
+        with client.stream("POST", "/v1/chat/completions", json={
+            "model": "gemma-4-12B-it-Q4_K_M.gguf",
+            "messages": [
+                {"role": "system", "content": "You are Odysseus, an AI workspace agent."},
+                {"role": "user", "content": "busca en internet las noticias de hoy"},
+            ],
+            "tools": ODYSSEUS_TOOLS,
+            "tool_choice": "auto",
+            "stream": True,
+            "temperature": 1.0,
+        }) as r:
+            assert r.status_code == 200          # nunca 422
+            raw = "".join(r.iter_text())
+        # TODAS las tools llegaron a llama-cpp (no se perdió ninguna)
+        assert len(server._state.llama_model.last_kwargs["tools"]) == 3
+        # y el cliente recibe las tool_calls en formato OpenAI
+        datas = [l[6:] for l in raw.splitlines() if l.startswith("data: ")]
+        chunks = [json.loads(d) for d in datas[:-1]]
+        assert any(c["choices"][0]["delta"].get("tool_calls") for c in chunks)
+
+    def test_ronda2_historial_con_resultado_de_tool_no_422(self, client):
+        """Ronda 2: el historial trae la tool call del assistant + el role=tool
+        con el resultado. Esta forma daba 422 antes de soportar tool_call_id."""
+        r = client.post("/v1/chat/completions", json={
+            "model": "gemma-4-12B-it-Q4_K_M.gguf",
+            "messages": [
+                {"role": "system", "content": "You are Odysseus."},
+                {"role": "user", "content": "busca noticias"},
+                {"role": "assistant", "content": None, "tool_calls": [FAKE_TOOL_CALL]},
+                {"role": "tool", "tool_call_id": "call_abc123",
+                 "name": "web_search", "content": "Titular 1; Titular 2"},
+            ],
+            "tools": ODYSSEUS_TOOLS,
+            "tool_choice": "auto",
+        })
+        assert r.status_code == 200
+        sent = server._state.llama_model.last_kwargs["messages"]
+        # el resultado de la tool llega íntegro al modelo
+        tool_msg = next(m for m in sent if m["role"] == "tool")
+        assert tool_msg["content"] == "Titular 1; Titular 2"
+        assert tool_msg["tool_call_id"] == "call_abc123"
+
+    def test_sin_tools_no_inventa_tool_calls(self, client):
+        """Chat normal de Odysseus (sin tools) → respuesta de texto, sin tool_calls."""
+        r = client.post("/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "hola"}],
+        })
+        msg = r.json()["choices"][0]["message"]
+        assert msg["content"]
+        assert not msg.get("tool_calls")
+
+
+# ---------------------------------------------------------------------------
+# 6. Parser de sintaxis nativa Gemma 4 (fallback cuando llama-cpp no parsea)
+# ---------------------------------------------------------------------------
+
+class TestGemmaToolParser:
+    def test_sintaxis_observada_en_vivo(self):
+        """Salida real de Gemma 4 12B Q4_K_M servida por llama-cpp (10-jun-2026)."""
+        from motor.server import _parse_gemma_tool_calls
+        text = '<|tool_call>call:file_organize{path:<|"|>Descargas<|"|>}<tool_call|>'
+        calls = _parse_gemma_tool_calls(text)
+        assert calls is not None and len(calls) == 1
+        assert calls[0]["type"] == "function"
+        assert calls[0]["function"]["name"] == "file_organize"
+        assert json.loads(calls[0]["function"]["arguments"]) == {"path": "Descargas"}
+        assert calls[0]["id"].startswith("call_")
+
+    def test_texto_normal_devuelve_none(self):
+        from motor.server import _parse_gemma_tool_calls
+        assert _parse_gemma_tool_calls("Hola, ¿en qué puedo ayudarte?") is None
+        assert _parse_gemma_tool_calls("") is None
+        assert _parse_gemma_tool_calls(None) is None
+
+    def test_rutas_windows_y_arrays(self):
+        """Salida real observada en el E2E doméstico (11-jun-2026): rutas
+        Windows con backslashes (escapes JSON inválidos) y argumento array."""
+        from motor.server import _parse_gemma_tool_calls
+        text = (
+            '<|tool_call>call:file_organize{'
+            'dest:<|"|>C:\\Users\\Felipe\\Temp\\Imagenes<|"|>,'
+            'files:[<|"|>C:\\Users\\Felipe\\Temp\\a.jpg<|"|>,'
+            '<|"|>C:\\Users\\Felipe\\Temp\\b.jpg<|"|>]}<tool_call|>'
+        )
+        calls = _parse_gemma_tool_calls(text)
+        args = json.loads(calls[0]["function"]["arguments"])
+        assert args["dest"] == "C:\\Users\\Felipe\\Temp\\Imagenes"
+        assert args["files"] == [
+            "C:\\Users\\Felipe\\Temp\\a.jpg",
+            "C:\\Users\\Felipe\\Temp\\b.jpg",
+        ]
+
+    def test_argumentos_no_parseables_se_entregan_crudos(self):
+        from motor.server import _parse_gemma_tool_calls
+        text = '<|tool_call>call:foo{esto no es json valido :::}<tool_call|>'
+        calls = _parse_gemma_tool_calls(text)
+        assert calls[0]["function"]["name"] == "foo"
+        assert "raw" in json.loads(calls[0]["function"]["arguments"])
+
+    def test_endpoint_convierte_texto_gemma_en_tool_calls(self, client):
+        """Si el stub devuelve la sintaxis Gemma como texto y el cliente envió
+        tools, la respuesta debe llevar tool_calls estructuradas."""
+        server._state.llama_model = FakeLlama(
+            reply='<|tool_call>call:file_organize{path:<|"|>Descargas<|"|>}<tool_call|>'
+        )
+        # FakeLlama con tools devuelve FAKE_TOOL_CALL; forzamos la rama texto
+        # quitando el atajo: un stub que ignora tools y devuelve texto Gemma
+        fake = server._state.llama_model
+
+        def _no_structured(messages, stream=False, **kw):
+            return {
+                "choices": [{
+                    "message": {"role": "assistant", "content": fake.reply},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
+            }
+        fake.create_chat_completion = _no_structured
+
+        r = client.post("/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "organiza descargas"}],
+            "tools": TOOLS,
+        })
+        choice = r.json()["choices"][0]
+        assert choice["finish_reason"] == "tool_calls"
+        assert choice["message"]["content"] is None
+        tc = choice["message"]["tool_calls"][0]
+        assert tc["function"]["name"] == "file_organize"
+        assert json.loads(tc["function"]["arguments"]) == {"path": "Descargas"}
+
+
+# ---------------------------------------------------------------------------
+# 6-bis. Canales <|channel>thought de Gemma 4 (fuga observada en E2E vivo)
+# ---------------------------------------------------------------------------
+
+class TestGemmaChannels:
+    def test_strip_thought_vacio(self):
+        from motor.server import _strip_gemma_channels
+        assert _strip_gemma_channels(
+            "<|channel>thought\n<channel|>Hola, ¿en qué ayudo?"
+        ) == "Hola, ¿en qué ayudo?"
+
+    def test_strip_con_razonamiento(self):
+        from motor.server import _strip_gemma_channels
+        assert _strip_gemma_channels(
+            "<|channel>thought\nEl usuario saluda, respondo cordial.<channel|>¡Hola!"
+        ) == "¡Hola!"
+
+    def test_texto_normal_intacto(self):
+        from motor.server import _strip_gemma_channels
+        assert _strip_gemma_channels("Respuesta normal") == "Respuesta normal"
+        assert _strip_gemma_channels("") == ""
+
+    def test_stream_hold_retiene_marcador_parcial(self):
+        from motor.server import _gemma_stream_hold
+        # Chunk inicial parcial que PODRÍA ser el canal → retener
+        assert _gemma_stream_hold("<|chan") == (False, "")
+        # Texto que claramente no es el canal → emitir tal cual
+        decided, out = _gemma_stream_hold("Hola")
+        assert decided and out == "Hola"
+
+    def test_stream_hold_suelta_tras_cierre(self):
+        from motor.server import _gemma_stream_hold
+        decided, out = _gemma_stream_hold(
+            "<|channel>thought\npensando...<channel|>La respuesta"
+        )
+        assert decided and out == "La respuesta"
+
+    def test_stream_endpoint_filtra_canal(self, client):
+        """El streaming no debe emitir los tags del canal thought."""
+        server._state.llama_model = FakeLlama(
+            reply="<|channel>thought\n<channel|>Hola limpio"
+        )
+        with client.stream("POST", "/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "hola"}],
+            "stream": True,
+        }) as r:
+            raw = "".join(r.iter_text())
+        datas = [l[len("data: "):] for l in raw.splitlines() if l.startswith("data: ")]
+        chunks = [json.loads(d) for d in datas[:-1]]
+        text = "".join(c["choices"][0]["delta"].get("content", "") for c in chunks)
+        assert text == "Hola limpio"
+        assert "<|channel" not in raw
+        # Y el log también queda limpio
+        assert _read_log()[0]["assistant"] == "Hola limpio"
+
+
+# ---------------------------------------------------------------------------
+# 7. Regresión: /chat/session sigue logueando
+# ---------------------------------------------------------------------------
+
+class TestSessionRegression:
+    def test_session_loguea_con_session_id_y_turn(self, client):
+        r = client.post("/chat/session", json={"message": "hola sesión"})
+        assert r.status_code == 200
+        entries = _read_log()
+        assert len(entries) == 1
+        e = entries[0]
+        assert e["session_id"] == r.json()["session_id"]
+        assert e["turn"] == 1
+        assert e["user_msg"] == "hola sesión"
+        assert e["endpoint"] == "chat/session"

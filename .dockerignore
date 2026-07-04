@@ -1,0 +1,41 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# .dockerignore — excluye del contexto de build lo que no necesita la imagen
+# Los modelos y datos van como bind mounts en docker-compose.yml
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Modelos grandes (van en volúmenes, no en la imagen)
+*.gguf
+*.safetensors
+*.bin
+*.pt
+modelos/
+adapters/
+
+# Datos y logs (van en volúmenes)
+datasets/
+data/
+logs/
+promotion/
+
+# Tests y documentación (no necesarios en producción)
+tests/
+presentacion/
+legacy/
+*.md
+*.html
+*.tex
+
+# Cache y entornos Python
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Git
+.git/
+.gitignore
+
+# VS Code
+.vscode/

@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Training Report — domestic_7b</title>
+<style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:'Segoe UI',system-ui,sans-serif;background:#0f1117;color:#e2e8f0;padding:20px}
+    .container{max-width:900px;margin:0 auto}
+    .header{background:linear-gradient(135deg,#1e3a8a,#3b82f6);border-radius:12px;padding:32px;margin-bottom:24px;text-align:center}
+    .header h1{font-size:28px;color:#fff;margin-bottom:8px}
+    .header .subtitle{color:#93c5fd;font-size:14px}
+    .card{background:#1a1d2e;border:1px solid #2d3148;border-radius:10px;padding:24px;margin-bottom:20px}
+    .card h2{font-size:18px;color:#60a5fa;margin-bottom:16px;border-bottom:1px solid #2d3148;padding-bottom:8px}
+    .metrics-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
+    .metric{background:#0f1117;border-radius:8px;padding:16px;text-align:center}
+    .metric .value{font-size:24px;font-weight:800;color:#60a5fa}
+    .metric .label{font-size:11px;color:#64748b;margin-top:4px;text-transform:uppercase;letter-spacing:.06em}
+    .smoke-status{padding:10px 16px;border-radius:8px;margin-bottom:16px;font-weight:600}
+    .smoke-ok{background:#064e3b;color:#6ee7b7;border:1px solid#065f46}
+    .smoke-fail{background:#7f1d1d;color:#fca5a5;border:1px solid#991b1b}
+    .params-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+    .param{background:#0f1117;border-radius:6px;padding:12px}
+    .param .pval{font-weight:700;color:#f8fafc}
+    .param .plbl{font-size:11px;color:#64748b}
+    table{width:100%;border-collapse:collapse;font-size:12px}
+    th{background:#1e293b;padding:10px 12px;text-align:left;font-weight:600;color:#94a3b8;font-size:11px;text-transform:uppercase}
+    td{padding:10px 12px;border-bottom:1px solid#1e293b;vertical-align:top}
+    .example-input{color:#93c5fd;max-width:200px;word-break:break-all}
+    .example-output{max-width:180px;word-break:break-all}
+    .diff-high{color:#22c55e;font-weight:700}
+    .diff-med{color:#eab308;font-weight:700}
+    .diff-low{color:#ef4444;font-weight:700}
+    .recs{list-style:none}
+    .recs li{padding:8px 0;border-bottom:1px solid#1e293b;line-height:1.5}
+    .recs li:last-child{border-bottom:none}
+    .footer{text-align:center;color:#475569;font-size:11px;padding:20px}
+    @media print{body{background:#fff;color:#000}.card{background:#fff;border:1px solid#ccc}.header{background:#1e3a8a}}
+</style>
+</head>
+<body>
+<div class="container">
+
+<div class="header">
+    <h1>📊 Training Report</h1>
+    <div class="subtitle">domestic_7b — Qwen/Qwen2.5-7B-Instruct</div>
+</div>
+
+<div class="card">
+    <h2>🧪 Smoke Test</h2>
+    <div class='smoke-status smoke-ok'>✅ ADAPTER FUNCIONA (diferencia media: 100.0%)</div>
+    <table>
+        <tr><th>Input</th><th>Base Model</th><th>Adapter</th><th>Diff</th></tr>
+        <tr>
+            <td class="example-input">&lt;|im_start|&gt;system
+Eres un agente autónomo que resuelve tareas paso a paso usando herramientas.
+Dire</td>
+            <td class="example-output"></td>
+            <td class="example-output" style="color:#22c55e">un=False (defecto) nunca modifica nada.
+  Ejemplo: server   (str): servidor IMAP</td>
+            <td class="diff-high">100.0%</td>
+        </tr><tr>
+            <td class="example-input">&lt;|im_start|&gt;system
+Eres un agente autónomo que resuelve tareas paso a paso usando herramientas.
+Dire</td>
+            <td class="example-output"></td>
+            <td class="example-output" style="color:#22c55e">un=False (defecto) nunca modifica nada.
+  Ejemplo: server   (str): servidor IMAP</td>
+            <td class="diff-high">100.0%</td>
+        </tr><tr>
+            <td class="example-input">&lt;|im_start|&gt;system
+Eres un agente autónomo que resuelve tareas paso a paso usando herramientas.
+Dire</td>
+            <td class="example-output"></td>
+            <td class="example-output" style="color:#22c55e">un=False (defecto) nunca modifica nada.
+  Ejemplo: server   (str): servidor IMAP</td>
+            <td class="diff-high">100.0%</td>
+        </tr>
+    </table>
+</div>
+
+<div class="card">
+    <h2>📈 Métricas</h2>
+    <div class="metrics-grid">
+        <div class="metric"><div class="value">0.3516</div><div class="label">Train Loss</div></div>
+        <div class="metric"><div class="value">0.0006</div><div class="label">Eval Loss</div></div>
+        <div class="metric"><div class="value">29.43 min</div><div class="label">Tiempo</div></div>
+        <div class="metric"><div class="value">15.01 GB</div><div class="label">VRAM Pico</div></div>
+    </div>
+    <div class="params-grid">
+        <div class="param"><div class="pval">r=16, α=32</div><div class="plbl">LoRA</div></div>
+        <div class="param"><div class="pval">3 épocas</div><div class="plbl">Entrenamiento</div></div>
+        <div class="param"><div class="pval">batch 16</div><div class="plbl">Batch efectivo</div></div>
+        <div class="param"><div class="pval">356 / 40</div><div class="plbl">Train / Eval samples</div></div>
+        <div class="param"><div class="pval">peft_trl</div><div class="plbl">Motor</div></div>
+        <div class="param"><div class="pval">N/A</div><div class="plbl">Dominio</div></div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>💡 Recomendaciones</h2>
+    <ul class="recs"><li>✅ Gap train/eval bajo (-0.351). El modelo generaliza bien.</li></ul>
+</div>
+
+<div class="footer">
+    Generado por Fábrica de LoRAs Especializados — 19 de May de 2026, 12:22
+</div>
+
+</div>
+</body>
+</html>

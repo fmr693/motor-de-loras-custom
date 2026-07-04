@@ -1,0 +1,24 @@
+{
+  "model_id": "Qwen/Qwen2.5-14B-Instruct",
+  "adapter_dir": "adapters\\finance_sentiment_14b",
+  "engine": "peft_trl",
+  "lora_r": 32,
+  "lora_alpha": 64,
+  "target_modules": [
+    "q_proj",
+    "v_proj",
+    "k_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj"
+  ],
+  "epochs": 3,
+  "batch_effective": 16,
+  "train_loss": 0.727,
+  "eval_loss": 0.9097,
+  "train_samples": 10737,
+  "eval_samples": 1194,
+  "elapsed_min": 209.73,
+  "vram_peak_gb": 16.83
+}

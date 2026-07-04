@@ -1,0 +1,46 @@
+diff --git a/src/agent_loop.py b/src/agent_loop.py
+index 0df6087..a9623f6 100644
+--- a/src/agent_loop.py
++++ b/src/agent_loop.py
+@@ -1342,6 +1342,13 @@ async def stream_agent_loop(
+             _ep = _db.query(_ME).filter(_ME.base_url == endpoint_url).first()
+             if not _ep and endpoint_url:
+                 _u = endpoint_url.rstrip("/")
++                # Sessions store the full completions URL (.../v1/chat/completions)
++                # while endpoint rows store the /v1 base — normalize before
++                # comparing or the per-endpoint supports_tools flag never matches.
++                for _suffix in ("/chat/completions", "/completions"):
++                    if _u.endswith(_suffix):
++                        _u = _u[: -len(_suffix)]
++                        break
+                 _ep = _db.query(_ME).filter(_ME.base_url == _u).first() or \
+                       _db.query(_ME).filter(_ME.base_url == _u + "/").first()
+             if _ep is not None:
+@@ -1359,6 +1366,9 @@ async def stream_agent_loop(
+         # with the per-endpoint flag above.
+         "minimax", "kimi", "yi-", "phi-3", "phi-4", "command-r",
+         "glm-4", "internlm", "hermes",
++        # Gemma 4 has native function calling (model card: "Enhanced
++        # Coding & Agentic Capabilities ... native function-calling")
++        "gemma-4", "gemma4",
+     ))
+     if _endpoint_supports is True:
+         _is_api_model = True
+diff --git a/src/tool_execution.py b/src/tool_execution.py
+index c8075da..23734a9 100644
+--- a/src/tool_execution.py
++++ b/src/tool_execution.py
+@@ -415,7 +415,12 @@ async def _direct_fallback(
+             raw = content.strip()
+             query = raw
+             time_filter = None
+-            max_pages = 5
++            # Local-model tuning (29-jun-2026): 5 páginas completas por búsqueda
++            # ahogaban la síntesis de un 12B local (preguntas multi-parte =
++            # 3 búsquedas x 5 páginas = contexto gigante, prefill lentísimo).
++            # Los snippets ya traen los datos clave; 2 páginas dan profundidad
++            # suficiente sin desbordar. El cliente puede pedir más en los args.
++            max_pages = 2
+             # Allow JSON-shaped args: {"query": "...", "time_filter": "day", "max_pages": 7}
+             if raw.startswith("{"):
+                 try:

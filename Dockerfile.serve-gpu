@@ -1,0 +1,91 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Dockerfile.serve-gpu — Contenedor de inferencia GPU (tarea D, 10-jun-2026)
+#
+# Por qué existe: en Windows los wheels nativos de llama-cpp-python fallan
+# (CPU: crash AVX 0xc000001d; CUDA: requiere CUDA Toolkit con admin), y el
+# contenedor CPU desaprovecha la RTX 4080.
+#
+# Por qué se compila desde fuente: el wheel precompilado cu124 de abetlen
+# crashea con SIGILL en este CPU (i7-13700K: avx2 sí, avx512 NO — el wheel
+# usa instrucciones más nuevas). Compilamos con GGML_NATIVE=off + AVX2
+# explícito (baseline segura) y CUDA arch 89 (Ada / RTX 4080).
+#
+# El modelo vive en VRAM (n_gpu_layers=-1), así que el límite de RAM virtual
+# de Docker Desktop (~7.9 GB) que bloqueó el GGUF en CPU ya no aplica.
+#
+# Build:  docker build -f Dockerfile.serve-gpu -t motor-serve-gpu .
+# Run:    docker compose -f docker-compose.unificado.yml --profile gpu up -d motor-serve-gpu
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Etapa 1: compilar llama-cpp-python con CUDA ─────────────────────────────
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        python3-dev \
+        build-essential \
+        cmake \
+        git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel
+
+# GGML_NATIVE=off: sin -march=native (el builder podría tener más flags que
+# el host). AVX2/FMA/F16C explícitos = baseline del i7-13700K.
+# CUDA arch 89 = Ada Lovelace (RTX 4080) — compila solo esa arquitectura.
+# GGML_CUDA_NO_VMM=ON: la API de driver cuMem* (VMM) no enlaza en build-time
+# (libcuda.so solo existe como stub) y además está rota en WSL2, que es
+# donde corre Docker Desktop.
+ENV CMAKE_ARGS="-DGGML_CUDA=on -DGGML_CUDA_NO_VMM=ON -DGGML_NATIVE=off -DGGML_AVX2=on -DGGML_FMA=on -DGGML_F16C=on -DCMAKE_CUDA_ARCHITECTURES=89"
+# libcuda.so (API de driver: cuMemCreate/VMM) no existe en build-time, solo
+# su stub; en runtime el nvidia-container-runtime inyecta la real
+ENV LIBRARY_PATH=/usr/local/cuda/lib64/stubs
+RUN pip3 wheel --no-deps llama-cpp-python -w /wheels
+
+# ── Etapa 2: imagen de runtime ──────────────────────────────────────────────
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+
+WORKDIR /app
+
+# Python 3.10 del sistema (suficiente en Linux; la regla "GGUF necesita 3.12"
+# es por disponibilidad de wheels en Windows, no aplica aquí).
+# libgomp1: runtime OpenMP que necesita ggml.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# pip/setuptools de Ubuntu 22.04 son demasiado viejos para editable installs
+# PEP 660 (pyproject.toml sin setup.py)
+RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel
+
+# Dependencias Python — primero las que no cambian (mejor cache)
+RUN pip3 install --no-cache-dir \
+        fastapi \
+        "uvicorn[standard]" \
+        python-multipart \
+        pandas \
+        numpy
+
+# llama-cpp-python compilado en la etapa builder
+COPY --from=builder /wheels /wheels
+RUN pip3 install --no-cache-dir /wheels/llama_cpp_python*.whl && rm -rf /wheels
+
+# Instalar el paquete motor en modo editable (sin dependencias pesadas)
+COPY pyproject.toml ./
+COPY motor/ ./motor/
+COPY fabrica_loras.py ./
+RUN pip3 install --no-cache-dir -e . --no-deps
+
+# Carpetas de runtime (los bind mounts las sobreescribirán)
+RUN mkdir -p modelos logs promotion
+
+EXPOSE 8000
+
+# MODEL_PATH configurable por env (sin hardcodear current.gguf)
+CMD ["sh", "-c", \
+     "MODEL=${MODEL_PATH:-modelos/current.gguf}; \
+      [ -f \"$MODEL\" ] || { echo \"[ERROR] $MODEL no encontrado. Monta el volumen de modelos o define MODEL_PATH.\"; exit 1; }; \
+      exec python3 fabrica_loras.py serve --model \"$MODEL\" --host 0.0.0.0 --port 8000"]

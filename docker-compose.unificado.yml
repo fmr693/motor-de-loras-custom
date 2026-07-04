@@ -1,0 +1,221 @@
+# ===========================================================================
+# docker-compose.unificado.yml
+# ===========================================================================
+# Stack unificado: Motor de LoRAs + Odysseus
+#
+# Servicios:
+#   odysseus       — workspace AI (chat, agentes, docs, memoria, email)
+#   motor-serve    — inferencia GGUF especializada (OpenAI-compatible)
+#   motor-worker   — ciclo de mejora continua (entrenamiento GPU)
+#   motor-bridge   — puente CL + watchdog GGUF
+#   chromadb       — vector store compartido
+#   searxng        — web search (agentes)
+#   ntfy           — notificaciones
+#
+# Uso:
+#   # Producción (serve siempre activo):
+#   docker compose -f docker-compose.unificado.yml up -d odysseus motor-serve chromadb searxng ntfy
+#
+#   # Entrenamiento nocturno (GPU, se apaga solo al terminar):
+#   docker compose -f docker-compose.unificado.yml --profile train up motor-worker
+#
+#   # Stack completo:
+#   docker compose -f docker-compose.unificado.yml --profile train up -d
+# ===========================================================================
+
+services:
+
+  # ── Odysseus — Workspace AI ───────────────────────────────────────
+  odysseus:
+    build:
+      context: ./odysseus
+      dockerfile: Dockerfile
+    ports:
+      - "7000:7000"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs                          # ← compartido con motor
+      - ./data/ssh:/app/.ssh
+      - ./data/huggingface:/app/.cache/huggingface
+    env_file:
+      - ./odysseus/.env
+    environment:
+      - SEARXNG_INSTANCE=http://searxng:8080
+      - CHROMADB_HOST=chromadb
+      - CHROMADB_PORT=8000
+      # Pre-configurar los endpoints del Motor para auto-descubrimiento.
+      # Se anuncian ambos serves (CPU y GPU): el discovery de Odysseus usa
+      # el que esté levantado. host.docker.internal cubre el caso de
+      # motor-serve corriendo en el host Windows (sesión 5-jun).
+      - LLM_ENDPOINTS=http://motor-serve:8000/v1,http://motor-serve-gpu:8000/v1,http://host.docker.internal:8000/v1
+      # Permitir setup inicial desde Docker (IP 172.x no es loopback)
+      - ODYSSEUS_ALLOW_REMOTE_FIRST_RUN_SETUP=true
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+    depends_on:
+      searxng:
+        condition: service_healthy
+      chromadb:
+        condition: service_started
+    restart: unless-stopped
+
+  # ── Motor Serve — Inferencia GGUF (Windows host, no Docker) ────────
+  motor-serve:
+    build:
+      context: .
+      dockerfile: Dockerfile.serve
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./logs:/app/logs                          # ← interaction_log.jsonl
+      - ./promotion:/app/promotion                # ← ready.flag (hot-reload)
+      - ./modelos:/app/modelos                    # ← GGUF files
+    environment:
+      - MODEL_PATH=${MOTOR_MODEL:-modelos/gemma4_12b/gemma-4-12B-it-Q4_K_M.gguf}
+      - HOST=0.0.0.0
+      - PORT=8000
+    # Sobrescribe CMD del Dockerfile para usar nuestro GGUF real
+    command: >
+      sh -c "[ -f /app/$$MODEL_PATH ] || { echo '[ERROR] $$MODEL_PATH no encontrado'; exit 1; };
+      exec python fabrica_loras.py serve --model /app/$$MODEL_PATH --host 0.0.0.0 --port 8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # ── Motor Serve GPU — Inferencia GGUF en RTX 4080 (perfil gpu) ─────
+  # Alternativa a motor-serve: mismo puerto 8000, así que arranca UNO u otro:
+  #   docker compose -f docker-compose.unificado.yml --profile gpu up -d motor-serve-gpu
+  # El modelo vive en VRAM (n_gpu_layers=-1 vía perfil gpu_full de hardware.py)
+  # → no le afecta el límite de RAM virtual de Docker Desktop.
+  motor-serve-gpu:
+    build:
+      context: .
+      dockerfile: Dockerfile.serve-gpu
+    profiles:
+      - gpu
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./logs:/app/logs
+      - ./promotion:/app/promotion
+      - ./modelos:/app/modelos
+    environment:
+      - MODEL_PATH=${MOTOR_MODEL:-modelos/gemma4_12b/gemma-4-12B-it-Q4_K_M.gguf}
+      - NVIDIA_VISIBLE_DEVICES=all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  # ── Motor Worker — Entrenamiento GPU (on-demand) ──────────────────
+  motor-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.train
+    profiles:
+      - train
+    volumes:
+      - ./logs:/app/logs
+      - ./adapters:/app/adapters
+      - ./datasets:/app/datasets
+      - ./modelos:/app/modelos
+      - ./promotion:/app/promotion
+    environment:
+      # ⚠️ LINAJE: motor-serve sirve Gemma 4 (ver MODEL_PATH arriba). Si el
+      # ciclo entrena sobre otra familia, el watchdog del servidor RECHAZARÁ
+      # la promoción (rejected.flag) — por diseño. MOTOR_BASE_MODEL y
+      # MOTOR_ADAPTER se definen en .env (retargeting Gemma 4, 10-jun-2026).
+      - BASE_MODEL_ID=${MOTOR_BASE_MODEL:-Qwen/Qwen2.5-7B-Instruct}
+      - ADAPTER_DIR=${MOTOR_ADAPTER:-adapters/domestic_base}
+      # Token HF: google/gemma-4-12B-it es gated (requiere licencia aceptada)
+      - HF_TOKEN=${HF_TOKEN:-}
+      - NVIDIA_VISIBLE_DEVICES=all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: "no"                                 # ← se apaga al terminar el ciclo
+
+  # ── Motor Bridge — CL + Watchdog + MCP ────────────────────────────
+  motor-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile.serve                # mismo Python 3.12
+    command: python -m motor.odysseus_bridge
+    volumes:
+      - ./logs:/app/logs
+      - ./adapters:/app/adapters
+      - ./datasets:/app/datasets
+      - ./modelos:/app/modelos
+      - ./promotion:/app/promotion
+    environment:
+      - ODYSSEUS_LOG_PATH=/app/logs/interaction_log.jsonl
+      - WATCHDOG_INTERVAL=5.0
+      - MOTOR_SERVE_URL=http://motor-serve:8000
+    depends_on:
+      - motor-serve
+      - odysseus
+    restart: unless-stopped
+
+  # ── ChromaDB — Vector store (compartido) ──────────────────────────
+  chromadb:
+    image: chromadb/chroma:latest
+    ports:
+      - "8100:8000"
+    volumes:
+      - chromadb-data:/chroma/chroma
+    environment:
+      - ANONYMIZED_TELEMETRY=FALSE
+    restart: unless-stopped
+
+  # ── SearXNG — Meta search engine ──────────────────────────────────
+  searxng:
+    image: searxng/searxng:latest
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - searxng-data:/etc/searxng
+      - ./config/searxng/settings.yml:/etc/searxng/settings.yml
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080/
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/', timeout=5).read(1)\""]
+      interval: 5s
+      timeout: 6s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── ntfy — Notificaciones push ────────────────────────────────────
+  ntfy:
+    image: binwiederhier/ntfy
+    command: serve
+    ports:
+      - "8091:80"
+    volumes:
+      - ntfy-cache:/var/cache/ntfy
+    environment:
+      - NTFY_BASE_URL=http://localhost:8091
+    restart: unless-stopped
+
+volumes:
+  searxng-data:
+  chromadb-data:
+  ntfy-cache:

@@ -1,0 +1,54 @@
+{
+  "model_id": "Qwen/Qwen2.5-3B-Instruct",
+  "adapter_dir": "C:\\Users\\Felipe\\Desktop\\Proyecto\\motor-de-loras-custom\\adapters\\domestic_v2",
+  "engine": "peft_trl",
+  "lora_r": 16,
+  "lora_alpha": 32,
+  "target_modules": [
+    "q_proj",
+    "v_proj",
+    "k_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj"
+  ],
+  "epochs": 3,
+  "batch_effective": 16,
+  "train_loss": 0.3765,
+  "eval_loss": 0.0003,
+  "train_samples": 356,
+  "eval_samples": 40,
+  "elapsed_min": 107.69,
+  "vram_peak_gb": 17.26,
+  "smoke_test": {
+    "passed": true,
+    "skipped": false,
+    "avg_difference_pct": 100.0,
+    "threshold": 10.0,
+    "samples": [
+      {
+        "input": "<|im_start|>system\nEres un agente autónomo que resuelve tareas paso a paso usando herramientas.\nDirectorio de trabajo ac",
+        "expected": "",
+        "base_output": "",
+        "adapter_output": "ake_run=True (defecto) nunca modifica nada, solo muestra el correo.\n  Ejemplo: server   (str): servidor IMAP, ej. \"imap.",
+        "difference_pct": 100.0
+      },
+      {
+        "input": "<|im_start|>system\nEres un agente autónomo que resuelve tareas paso a paso usando herramientas.\nDirectorio de trabajo ac",
+        "expected": "",
+        "base_output": "",
+        "adapter_output": "ake_run=True (defecto) nunca modifica nada, solo muestra el correo.\n  Ejemplo: server   (str): servidor IMAP, ej. \"imap.",
+        "difference_pct": 100.0
+      },
+      {
+        "input": "<|im_start|>system\nEres un agente autónomo que resuelve tareas paso a paso usando herramientas.\nDirectorio de trabajo ac",
+        "expected": "",
+        "base_output": "",
+        "adapter_output": "ake_run=True (defecto) nunca modifica nada, solo muestra el correo.\n  Ejemplo: server   (str): servidor IMAP, ej. \"imap.",
+        "difference_pct": 100.0
+      }
+    ],
+    "samples_tested": 3
+  }
+}

@@ -1,0 +1,45 @@
+# SearXNG settings — generado por Motor de LoRAs
+use_default_settings: true
+
+general:
+  instance_name: "Motor Search"
+  debug: false
+  privacypolicy_url: false
+  contact_url: false
+  enable_metrics: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: ""
+  formats:
+    - html
+    - json
+
+server:
+  secret_key: "motor-de-loras-searxng-secret-change-me"
+  bind_address: "0.0.0.0"
+  port: 8080
+  limiter: false
+  image_proxy: false
+  # Allow queries from any host in Docker network
+  allowed_hosts:
+    - localhost
+    - 127.0.0.1
+    - searxng
+    - odysseus
+
+ui:
+  static_use_hash: true
+  default_theme: simple
+  default_locale: es
+
+redis:
+  url: false
+
+outgoing:
+  request_timeout: 10.0
+  max_request_timeout: 30.0
+  useragent_suffix: ""
+  # Allow access to the search engines
+  using_tor_proxy: false

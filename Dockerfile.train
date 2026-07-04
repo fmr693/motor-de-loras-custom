@@ -1,0 +1,55 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Dockerfile.train — Contenedor de entrenamiento
+# PyTorch 2.4.1 + CUDA 12.4 + PEFT + TRL
+#
+# Se lanza bajo demanda para ejecutar el ciclo de mejora:
+#   DataDigestor → ContinualLearner → ExportManager → benchmark → promoción
+#
+# Requiere NVIDIA Container Toolkit en el host + driver ≥ 545
+# ─────────────────────────────────────────────────────────────────────────────
+FROM pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime
+
+WORKDIR /app
+
+# Dependencias del sistema
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        cmake \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Dependencias Python ML
+# transformers SIN tope y floor alto: gemma4_unified (AutoModelForMultimodalLM)
+# requiere una versión muy reciente (> 5.5). Si el build usa caché vieja,
+# reconstruir con --no-cache antes de entrenar Gemma 4.
+RUN pip install --no-cache-dir \
+        "transformers>=5.5" \
+        peft>=0.10 \
+        trl>=0.8 \
+        accelerate \
+        bitsandbytes \
+        datasets \
+        sentencepiece \
+        protobuf \
+        pandas \
+        numpy \
+        fastapi \
+        uvicorn[standard] \
+        Pillow>=10.0
+
+# llama-cpp-python con soporte CUDA para exportación GGUF y validación
+RUN pip install --no-cache-dir \
+        llama-cpp-python \
+        --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
+
+# Instalar el paquete motor en modo editable
+COPY pyproject.toml ./
+COPY motor/ ./motor/
+COPY fabrica_loras.py ./
+RUN pip install --no-cache-dir -e . --no-deps
+
+# Carpetas de runtime
+RUN mkdir -p modelos adapters datasets logs promotion
+
+# Por defecto ejecuta el ciclo de mejora continua
+CMD ["python", "-m", "motor.continual_cycle"]

@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "motor-de-loras"
+version = "0.1.0"
+description = "Motor de LoRAs — agente doméstico con ciclo de mejora continua"
+requires-python = ">=3.10"
+
+# ── Dependencias base: solo lo necesario para DataDigestor + servidor ──────
+# Instalables en cualquier entorno (CPU, Python 3.10-3.13, Linux/Windows/Mac)
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+# ── Contenedor serve (Python 3.12 / CPU / Docker) ─────────────────────────
+serve = [
+    "fastapi",
+    "uvicorn[standard]",
+    "python-multipart",
+    "llama-cpp-python",
+]
+
+# ── Contenedor worker / entrenamiento (Python 3.11 / CUDA / Docker) ────────
+train = [
+    "torch>=2.1",
+    "transformers>=4.40",
+    "peft>=0.10",
+    "trl>=0.8",
+    "accelerate",
+    "bitsandbytes>=0.43",
+    "datasets",
+    "sentencepiece",
+    "protobuf",
+    "Pillow>=10.0",
+]
+
+# ── Extras opcionales ──────────────────────────────────────────────────────
+ocr  = ["easyocr", "langdetect"]
+pdf  = ["pypdf>=4.0"]
+
+# ── Desarrollo local ───────────────────────────────────────────────────────
+dev  = ["pytest>=7", "pytest-timeout", "ruff"]
+
+[project.scripts]
+fabrica-loras = "fabrica_loras:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["motor*"]
+
+# ── Configuración pytest ───────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths  = ["tests"]
+timeout    = 120
+addopts    = "--tb=short"

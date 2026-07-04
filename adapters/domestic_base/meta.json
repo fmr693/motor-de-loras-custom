@@ -1,0 +1,53 @@
+{
+  "model_id": "Qwen/Qwen2.5-3B-Instruct",
+  "adapter_dir": "adapters\\domestic_base",
+  "engine": "peft_trl",
+  "lora_r": 16,
+  "lora_alpha": 32,
+  "target_modules": [
+    "q_proj",
+    "v_proj",
+    "k_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj"
+  ],
+  "epochs": 3,
+  "batch_effective": 16,
+  "train_loss": 0.3737,
+  "eval_loss": 0.1,
+  "train_samples": 630,
+  "eval_samples": 70,
+  "elapsed_min": 47.52,
+  "vram_peak_gb": 17.26,
+  "smoke_test": {
+    "passed": true,
+    "avg_difference_pct": 100.0,
+    "threshold": 10.0,
+    "samples": [
+      {
+        "input": "<|im_start|>system\nEres un agente autónomo que resuelve tareas paso a paso usando herramientas.\n\nFORMATO OBLIGATORIO — s",
+        "expected": "",
+        "base_output": "[ERROR: 'Qwen2ForCausalLM' object has no attribute 'enable_adapter']",
+        "adapter_output": "ia nada.\n  Ejemplo: server   (str): servidor IMAP, ej. \"imap.gmail.com\"\nuser     (str): dirección de correo\npassword (st",
+        "difference_pct": 100.0
+      },
+      {
+        "input": "<|im_start|>system\nEres un agente autónomo que resuelve tareas paso a paso usando herramientas.\n\nFORMATO OBLIGATORIO — s",
+        "expected": "",
+        "base_output": "[ERROR: 'Qwen2ForCausalLM' object has no attribute 'enable_adapter']",
+        "adapter_output": "ia nada.\n  Ejemplo: server   (str): servidor IMAP, ej. \"imap.gmail.com\"\nuser     (str): dirección de correo\npassword (st",
+        "difference_pct": 100.0
+      },
+      {
+        "input": "<|im_start|>system\nEres un agente autónomo que resuelve tareas paso a paso usando herramientas.\n\nFORMATO OBLIGATORIO — s",
+        "expected": "",
+        "base_output": "[ERROR: 'Qwen2ForCausalLM' object has no attribute 'enable_adapter']",
+        "adapter_output": "ia nada.\n  Ejemplo: server   (str): servidor IMAP, ej. \"imap.gmail.com\"\nuser     (str): dirección de correo\npassword (st",
+        "difference_pct": 100.0
+      }
+    ],
+    "samples_tested": 3
+  }
+}

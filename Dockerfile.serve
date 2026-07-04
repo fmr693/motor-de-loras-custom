@@ -1,0 +1,46 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Dockerfile.serve — Contenedor de producción
+# Python 3.12 + llama-cpp-python (CPU) + FastAPI
+#
+# Sirve el modelo GGUF al usuario 24/7.
+# No necesita GPU — llama.cpp corre en CPU.
+# Monitoriza promotion/ cada 30s para recargar nuevas versiones del modelo.
+# ─────────────────────────────────────────────────────────────────────────────
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Dependencias del sistema
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+    && rm -rf /var/lib/apt/lists/*
+
+# Dependencias Python — primero las que no cambian (mejor cache)
+RUN pip install --no-cache-dir \
+        fastapi \
+        uvicorn[standard] \
+        python-multipart \
+        pandas \
+        numpy
+
+# llama-cpp-python — wheel precompilado CPU para Linux
+RUN pip install --no-cache-dir \
+        llama-cpp-python \
+        --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+
+# Instalar el paquete motor en modo editable (sin dependencias pesadas)
+COPY pyproject.toml ./
+COPY motor/ ./motor/
+COPY fabrica_loras.py ./
+RUN pip install --no-cache-dir -e . --no-deps
+
+# Carpetas de runtime (los bind mounts las sobreescribirán)
+RUN mkdir -p modelos logs promotion
+
+EXPOSE 8000
+
+# Entrypoint: arranca servidor; si no hay modelo, sale con error claro en vez de crashear en silencio
+CMD ["sh", "-c", \
+     "[ -f modelos/current.gguf ] || { echo '[ERROR] modelos/current.gguf no encontrado. Monta el volumen de modelos.'; exit 1; }; \
+      exec python fabrica_loras.py serve --model modelos/current.gguf --host 0.0.0.0 --port 8000"]

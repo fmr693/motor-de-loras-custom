@@ -1,0 +1,43 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CI — suite completa de tests en cada push/PR (tarea F, auditoría 10-jun-2026)
+#
+# Protege el sello "0 fallos" del README: hasta ahora los 446 tests solo
+# corrían a mano. Sin GPU: las suites de entrenamiento usan mocks y las
+# que requieren hardware/paquetes ausentes se saltan (importorskip).
+# ─────────────────────────────────────────────────────────────────────────────
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # torch CPU primero: evita el wheel CUDA (~2.5 GB) que instalaría
+      # el extra [train] desde PyPI
+      - name: Install torch (CPU)
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      # llama-cpp-python precompilado CPU: evita compilar desde fuente
+      - name: Install llama-cpp-python (CPU wheel)
+        run: pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+
+      - name: Install project + deps de test
+        run: |
+          pip install -e .[serve,train,dev,pdf]
+          pip install httpx scikit-learn beautifulsoup4 openpyxl python-docx fpdf2 pyarrow langdetect
+
+      - name: Run tests
+        env:
+          PYTHONUTF8: "1"
+        run: pytest tests/ -q

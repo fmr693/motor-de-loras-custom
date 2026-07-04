@@ -1,0 +1,53 @@
+services:
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # serve — producción, siempre encendido
+  # Sirve el GGUF actual. Watchdog recarga al detectar promotion/ready.flag.
+  # ──────────────────────────────────────────────────────────────────────────
+  serve:
+    build:
+      context: .
+      dockerfile: Dockerfile.serve
+    container_name: fabrica_serve
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./modelos:/app/modelos        # GGUFs (current.gguf, candidate.gguf)
+      - ./logs:/app/logs              # interaction_log.jsonl generado aquí
+      - ./promotion:/app/promotion    # señal ready.flag entre contenedores
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # worker — entrenamiento, bajo demanda
+  # Ejecuta el ciclo completo: digest → train → export → benchmark → promover
+  #
+  # Uso:
+  #   docker compose --profile train run --rm worker
+  #   docker compose --profile train run --rm worker --dry-run
+  # ──────────────────────────────────────────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.train
+    container_name: fabrica_worker
+    volumes:
+      - ./modelos:/app/modelos        # escribe candidate.gguf
+      - ./adapters:/app/adapters      # lee/escribe adapters LoRA
+      - ./datasets:/app/datasets      # datasets JSONL de entrenamiento
+      - ./logs:/app/logs              # lee interaction_log.jsonl
+      - ./promotion:/app/promotion    # escribe ready.flag
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    profiles:
+      - train

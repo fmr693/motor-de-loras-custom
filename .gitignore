@@ -1,0 +1,72 @@
+# Datasets y assets pesados (descargar por separado)
+EXIST 2025 Memes Dataset*/
+Resultados Training*/
+
+# Cachés de features pre-computados
+cache_v2/
+cache_v3/
+cache/
+cache_motor/
+
+# Pesos de adapters y modelos exportados (>100 MB — distribuir via Drive)
+*.safetensors
+*.gguf
+modelos/
+
+# CSVs generados (se regeneran con el converter)
+data/
+
+# Logs de entrenamiento
+train_log.txt
+
+# Artefactos de build/install
+*.egg-info/
+dist/
+build/
+
+# Predicciones y checkpoints de modelos entrenados
+predictions_v2/
+predictions_v3/
+*.pt
+*.bin
+*.npy
+
+# Outputs de test y pipelines (solo carpetas de resultados)
+test_digestor_output/
+test_digestor_*_output/
+pipeline_emotion_output/
+test_vlm_output/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+.pytest_cache/
+
+# VS Code
+.vscode/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Output transitorio de _run_tests.py
+_test_output.txt
+
+# (10-jun-2026) duplicado eliminado: el log canonico vive en logs/
+interaction_logs/
+
+# Logs de docker build (transitorios)
+gpu_build*.log
+
+# Logs de interacción en runtime (datos, no código — los genera el servidor)
+logs/*.jsonl
+
+# Bitacora de trabajo (privada, no publicar)
+SESION.md
+SESION.backup.md
+
+# Material privado / archivo local (no publicar)
+legacy/
+presentacion/
+
