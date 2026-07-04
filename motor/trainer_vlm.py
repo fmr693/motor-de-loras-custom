@@ -391,7 +391,12 @@ class VLMTrainer:
 
     def _load_model(self):
         """Carga el VLM con 4-bit NF4 y aplica LoRA al backbone LLM."""
-        from transformers import AutoProcessor, AutoModelForVision2Seq, BitsAndBytesConfig
+        from transformers import AutoProcessor, BitsAndBytesConfig
+        # transformers >= 5 renombró AutoModelForVision2Seq → AutoModelForImageTextToText
+        try:
+            from transformers import AutoModelForVision2Seq as _AutoVLMModel
+        except ImportError:
+            from transformers import AutoModelForImageTextToText as _AutoVLMModel
         from peft import get_peft_model, LoraConfig, TaskType, prepare_model_for_kbit_training
 
         print("  Cargando procesador (tokenizer + image processor)...")
@@ -421,7 +426,7 @@ class VLMTrainer:
             model_kwargs["torch_dtype"] = _dtype
 
         print(f"  Cargando pesos: {self.model_id}")
-        model = AutoModelForVision2Seq.from_pretrained(self.model_id, **model_kwargs)
+        model = _AutoVLMModel.from_pretrained(self.model_id, **model_kwargs)
 
         if self.load_in_4bit and "quantization_config" in model_kwargs:
             model = prepare_model_for_kbit_training(

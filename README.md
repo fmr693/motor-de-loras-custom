@@ -159,13 +159,17 @@ motor-de-loras-custom/
 
 ---
 
-## Origen académico — EXIST 2025
+## Origen académico — EXIST 2025 (el círculo cerrado)
 
-| Tarea | Baseline V2 | LoRA V3 | Delta |
-|---|---|---|---|
-| T2.1 ¿Sexista? | F1 = 0.6714 | **F1 = 0.7038** | **+4.8 %** |
+El Motor nació del pipeline [EXIST 2025](https://github.com/fmr693/EXIST-2025) (detección multimodal de sexismo en memes, shared task de CLEF 2025) — y en julio de 2026 volvió a él como **primer caso de estudio medible**: el `VLMTrainer` afinó Qwen2-VL-2B (LoRA r=16, bf16, 3 épocas, **52 min en una RTX 4080 con 6 GB de VRAM**) y se comparó con el pipeline clásico original en el **mismo holdout del 15%** que ningún modelo vio entrenando:
 
-El proyecto nació de este pipeline y se generalizó a la fábrica actual.
+| Sistema (mismo holdout, 607 memes) | F1 macro | F1 YES |
+|---|---|---|
+| Pipeline clásico (XLM-RoBERTa + ResNet50, ensemble de 6 modelos) | 0.61 | 0.74 |
+| Qwen2-VL-2B zero-shot (umbral calibrado) | 0.62 | 0.73 |
+| **Qwen2-VL-2B + adapter LoRA del Motor (~50 MB)** | **0.70** | **0.79** |
+
+Un solo modelo de 2B con un adapter del Motor supera al ensemble completo: **+8,7 puntos de F1 macro**. Protocolo, scripts y detalles en el [repo EXIST-2025](https://github.com/fmr693/EXIST-2025).
 
 ---
 
