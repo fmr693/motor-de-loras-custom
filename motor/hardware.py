@@ -481,8 +481,24 @@ class HardwareProfile:
             # el prompt → respuesta final vacía (verificado 27-jun-2026, prueba
             # de la pregunta de 3 partes). 16k cabe en la RTX 4080 16 GB
             # (~11,5 GB: pesos 7,7 + KV ~3 + overhead) y absorbe el agente.
-            return dict(n_gpu_layers=-1, n_threads=n_thr_h,
-                        n_ctx=16384, use_mmap=True, verbose=False)
+            #
+            # Overrides por entorno (para clientes que exigen más contexto, p.ej.
+            # Hermes Agent, con suelo de 64k). La caché KV fp16 a 64k ocupa ~12 GB
+            # y no cabe con los pesos → MOTOR_KV_TYPE la cuantiza:
+            #   MOTOR_N_CTX    entero, tamaño del contexto (def. 16384)
+            #   MOTOR_KV_TYPE  ""|q8|q4 → caché KV en fp16 / Q8_0 / Q4_0
+            #                  (q8≈½ de VRAM, q4≈¼; requiere flash_attn para
+            #                   poder cuantizar la V-cache)
+            _n_ctx = int(os.environ.get("MOTOR_N_CTX", "16384"))
+            kw = dict(n_gpu_layers=-1, n_threads=n_thr_h,
+                      n_ctx=_n_ctx, use_mmap=True, verbose=False)
+            _kv = os.environ.get("MOTOR_KV_TYPE", "").strip().lower()
+            _KV_GGML = {"q8": 8, "q4": 2}  # GGML_TYPE_Q8_0=8, GGML_TYPE_Q4_0=2
+            if _kv in _KV_GGML:
+                kw["type_k"] = _KV_GGML[_kv]
+                kw["type_v"] = _KV_GGML[_kv]
+                kw["flash_attn"] = True  # obligatorio para V-cache cuantizada
+            return kw
         if p == "gpu_high":
             return dict(n_gpu_layers=35, n_threads=n_thr_h,
                         n_ctx=4096, use_mmap=True, verbose=False)

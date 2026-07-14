@@ -98,7 +98,11 @@ services:
     profiles:
       - gpu
     ports:
-      - "8000:8000"
+      # Publicado en 8001 del host (el CPU motor-serve ocupa 8000). Así un
+      # cliente NATIVO de Windows (p.ej. Hermes) puede apuntar al GPU real:
+      # http://localhost:8001/v1. Odysseus sigue usándolo por nombre de red
+      # (http://motor-serve-gpu:8000), ajeno al puerto del host.
+      - "8001:8000"
     volumes:
       - ./logs:/app/logs
       - ./promotion:/app/promotion
@@ -106,6 +110,11 @@ services:
     environment:
       - MODEL_PATH=${MOTOR_MODEL:-modelos/gemma4_12b/gemma-4-12B-it-Q4_K_M.gguf}
       - NVIDIA_VISIBLE_DEVICES=all
+      # Contexto ampliado para clientes con suelo alto (Hermes exige >=64k).
+      # KV en Q4_0 para que la caché quepa en la RTX 4080 16 GB (~3 GB @ 64k
+      # vs ~12 GB en fp16). Ver motor/hardware.py perfil gpu_full.
+      - MOTOR_N_CTX=${MOTOR_N_CTX:-65536}
+      - MOTOR_KV_TYPE=${MOTOR_KV_TYPE:-q4}
     deploy:
       resources:
         reservations:

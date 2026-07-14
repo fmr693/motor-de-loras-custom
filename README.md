@@ -5,7 +5,7 @@
 > sobre cualquier modelo open-source, y lo sirve de principio a fin. **Sin nube. 0 €/consulta. 100% privado.**
 
 **Origen:** pipeline EXIST 2025 (detección de sexismo en memes) generalizado a una fábrica reutilizable.
-**Estado:** 511 tests · 0 fallos · 14 comandos CLI · Docker (CPU y GPU) · modelo base actual **Gemma 4 12B** a ~50 tok/s en RTX 4080 · stack con Odysseus integrado y RAG verificado.
+**Estado:** 513 tests · 0 fallos · 14 comandos CLI · Docker (CPU y GPU) · modelo base actual **Gemma 4 12B** a ~50 tok/s en RTX 4080 · contexto configurable hasta 64K (caché KV cuantizable) · RAG verificado · compatible con frontends agénticos (Odysseus y Hermes).
 
 ---
 
@@ -119,19 +119,20 @@ docker compose -f docker-compose.unificado.yml --profile train up motor-worker
 
 ---
 
-## Integración con Odysseus
+## Frontends agénticos
 
-[Odysseus](https://github.com/apexEvan/odysseus) es un workspace de IA (chat, agentes, RAG, búsqueda web). El Motor le aporta el backend de inferencia local; Odysseus aporta la interfaz y las herramientas. Se conectan por la API estilo OpenAI.
+El servidor expone una API estilo OpenAI, así que **cualquier frontend compatible** puede usar el Motor como cerebro local. Verificados en vivo dos, complementarios:
 
-Verificado en vivo: tool-calling agéntico (el modelo decide y ejecuta herramientas), búsqueda web, y RAG sobre documentos propios con embeddings locales (nada sale del equipo).
+- **[Odysseus](https://github.com/apexEvan/odysseus)** — workspace de IA en el navegador (chat, agentes, RAG de documentos, búsqueda web). Aporta la interfaz de "oficina". Tool-calling agéntico y RAG con embeddings locales verificados (nada sale del equipo). Sus parches (reaplicables, candidatos a PR upstream) están en [`integration_patches/`](integration_patches/).
+- **[Hermes Agent](https://github.com/nousresearch/hermes-agent)** (Nous Research, MIT) — agente con memoria persistente, *skills* y gateway a mensajería (Telegram, etc.). El "asistente de bolsillo". Conversación, bucle agéntico y **búsqueda web soberana** (vía el SearXNG del stack, fijado con `web.search_backend`) verificados contra Gemma local.
 
-Los parches necesarios al submódulo Odysseus están en [`integration_patches/`](integration_patches/) (reaplicables; candidatos a PR upstream).
+> Nota de contexto: los clientes agénticos meten mucho en el prompt (system + herramientas + memoria). Hermes exige ≥64K tokens; por eso el serve GPU admite `MOTOR_N_CTX` y `MOTOR_KV_TYPE` (caché KV en Q4/Q8) para ampliar contexto sin salirse de la VRAM. Auditado: sin pérdida de calidad ni de recall.
 
 ---
 
 ## Tests
 
-511 tests · 0 fallos · tres capas (unitaria, integración E2E, comportamiento).
+513 tests · 0 fallos · tres capas (unitaria, integración E2E, comportamiento).
 
 ```bash
 PYTHONUTF8=1 python -m pytest tests/ -q       # suite completa

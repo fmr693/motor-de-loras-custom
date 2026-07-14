@@ -626,3 +626,31 @@ class TestSessionRegression:
         assert e["turn"] == 1
         assert e["user_msg"] == "hola sesión"
         assert e["endpoint"] == "chat/session"
+
+
+# ---------------------------------------------------------------------------
+# 8. Robustez: desbordamiento de contexto → 400, no 500 (auditoría 14 jul 2026)
+# ---------------------------------------------------------------------------
+
+class TestContextOverflow:
+    """`_raise_inference_error` clasifica el error de llama.cpp: el
+    desbordamiento de contexto es culpa del prompt del cliente (400), no un
+    fallo interno (500)."""
+
+    def test_overflow_da_400_context_length_exceeded(self):
+        from fastapi import HTTPException
+        # Mensaje real de llama-cpp 0.3.28 (verificado en vivo)
+        exc = ValueError("Requested tokens (75470) exceed context window of 65536")
+        with pytest.raises(HTTPException) as ei:
+            server._raise_inference_error(exc)
+        assert ei.value.status_code == 400
+        assert "context_length_exceeded" in ei.value.detail
+        assert "MOTOR_N_CTX" in ei.value.detail  # pista accionable para el operador
+
+    def test_otros_errores_siguen_siendo_500(self):
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as ei:
+            server._raise_inference_error(RuntimeError("boom"), "Error en inferencia")
+        assert ei.value.status_code == 500
+        assert "boom" in ei.value.detail
+        assert "context_length_exceeded" not in ei.value.detail

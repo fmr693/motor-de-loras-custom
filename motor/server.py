@@ -601,6 +601,22 @@ def _oai_content_to_text(content: Any) -> str:
         return "\n".join(parts)
     return str(content)
 
+
+def _raise_inference_error(exc: Exception, context: str = "Error en inferencia"):
+    """Traduce una excepción de inferencia a HTTPException con el código
+    adecuado. El desbordamiento de contexto de llama.cpp ('Requested tokens (N)
+    exceed context window of M') es culpa del prompt del cliente, no del
+    servidor → 400 `context_length_exceeded` en vez de un 500 opaco. El resto
+    de errores siguen siendo 500."""
+    from fastapi import HTTPException
+    if "exceed context window" in str(exc).lower():
+        raise HTTPException(status_code=400, detail=(
+            f"context_length_exceeded: {exc}. El prompt supera el contexto del "
+            f"modelo — reduce el historial/documentos, o sirve con MOTOR_N_CTX "
+            f"mayor (ver motor/hardware.py)."))
+    raise HTTPException(status_code=500, detail=f"{context}: {exc}")
+
+
 class _OAIRequest(_OAIBase):  # type: ignore
     # Optional: el Deep Research de Odysseus sondea con model=null y el 422
     # resultante mataba la investigación. Solo servimos un modelo: se ignora.
@@ -1672,7 +1688,7 @@ def create_app() -> "fastapi.FastAPI":
                     messages, max_toks, temp, req.top_p, return_meta=True
                 )
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error en inferencia: {e}")
+            _raise_inference_error(e)
 
         model_name = str(Path(_state.model_path).name)
         elapsed_ms = int((time.time() - t0) * 1000)
@@ -1742,7 +1758,7 @@ def create_app() -> "fastapi.FastAPI":
         try:
             response = _infer(messages, req.max_tokens, req.temperature, req.top_p)
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error en inferencia: {e}")
+            _raise_inference_error(e)
 
         return ChatResponse(
             response = response,
@@ -1815,7 +1831,7 @@ def create_app() -> "fastapi.FastAPI":
         except Exception as e:
             # Revertir el mensaje añadido si falla
             history.pop()
-            raise HTTPException(status_code=500, detail=f"Error en inferencia: {e}")
+            _raise_inference_error(e)
 
         history.append({"role": "assistant", "content": response})
 
@@ -1888,7 +1904,7 @@ def create_app() -> "fastapi.FastAPI":
         try:
             result = agent.run(req.task)
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error en el agente: {e}")
+            _raise_inference_error(e, "Error en el agente")
 
         d = result.to_dict()
         d["ms"] = int((time.time() - t0) * 1000)
