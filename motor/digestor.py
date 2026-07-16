@@ -2558,6 +2558,9 @@ learning_rate: 2e-4
             elif "instruction" in ex:
                 # Alpaca
                 return f"{ex.get('instruction','')} {ex.get('input','')} {ex.get('output','')}"
+            elif "text" in ex:
+                # Completion (nivel conocimiento crudo)
+                return str(ex["text"])
             return ""
 
         texts = [_extract_text(ex) for ex in self._examples]

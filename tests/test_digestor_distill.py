@@ -264,3 +264,87 @@ class TestKnowledge:
         d = DataDigestor(mode="knowledge", auto_enrich=False)
         with pytest.raises(ValueError):
             d.from_document_knowledge(f, level="inventado")
+
+
+# ---------------------------------------------------------------------------
+# F5 — Exposición de distill/knowledge en el CLI (digestor --mode)
+# ---------------------------------------------------------------------------
+
+import json as _json
+
+
+def _run_cli(argv):
+    """Construye el parser real de fabrica_loras y ejecuta el subcomando."""
+    from fabrica_loras import _build_parser
+    args = _build_parser().parse_args(argv)
+    args.func(args)
+
+
+def _rows(path):
+    return [_json.loads(l) for l in path.read_text(encoding="utf-8").splitlines()
+            if l.strip()]
+
+
+class TestCLIModos:
+    def test_classify_sin_task_falla(self, tmp_path):
+        # El modo por defecto es classify → sin --task debe abortar con aviso.
+        data = tmp_path / "d.csv"
+        data.write_text("text,label\nhola,1\n", encoding="utf-8")
+        out = tmp_path / "out.jsonl"
+        with pytest.raises(SystemExit):
+            _run_cli(["digestor", "--data", str(data), "--output", str(out)])
+
+    def test_default_mode_es_classify(self, tmp_path):
+        # Invocación clásica (sin --mode) sigue funcionando: retrocompat EXIST.
+        data = tmp_path / "d.csv"
+        data.write_text("text,label\nbueno,POS\nmalo,NEG\n", encoding="utf-8")
+        out = tmp_path / "out.jsonl"
+        _run_cli(["digestor", "--data", str(data), "--label-col", "label",
+                  "--task", "Clasifica el sentimiento.", "--output", str(out)])
+        assert _rows(out)
+
+    def test_distill_e2e(self, tmp_path):
+        md = tmp_path / "chat.md"
+        md.write_text("## Human\n¿Cuánto es 2+2?\n## Assistant\nSoy Claude. Son 4.",
+                      encoding="utf-8")
+        out = tmp_path / "sft.jsonl"
+        _run_cli(["digestor", "--mode", "distill",
+                  "--data", str(md), "--output", str(out)])
+        rows = _rows(out)
+        assert rows
+        msgs = rows[0]["messages"]
+        assert msgs[0]["role"] == "system"
+        joined = " ".join(m["content"] for m in msgs)
+        assert "Soy Claude" not in joined          # higiene por defecto
+        assert "Son 4." in joined                  # el dato útil sobrevive
+
+    def test_distill_keep_identity_opt_out(self, tmp_path):
+        md = tmp_path / "chat.md"
+        md.write_text("## Human\nhola\n## Assistant\nSoy Claude, un asistente. Hola de nuevo.",
+                      encoding="utf-8")
+        out = tmp_path / "sft.jsonl"
+        _run_cli(["digestor", "--mode", "distill", "--keep-identity",
+                  "--data", str(md), "--output", str(out)])
+        joined = " ".join(m["content"] for m in _rows(out)[0]["messages"])
+        assert "Soy Claude" in joined              # opt-out respetado
+
+    def test_knowledge_template_e2e(self, tmp_path):
+        doc = tmp_path / "manual.md"
+        doc.write_text("# Rescisión\nEl contrato se rescinde con 30 días de aviso.",
+                       encoding="utf-8")
+        out = tmp_path / "qa.jsonl"
+        _run_cli(["digestor", "--mode", "knowledge", "--level", "template",
+                  "--data", str(doc), "--output", str(out)])
+        rows = _rows(out)
+        assert rows
+        assert [m["role"] for m in rows[0]["messages"]] == ["system", "user", "assistant"]
+
+    def test_knowledge_completion_e2e(self, tmp_path):
+        doc = tmp_path / "notas.md"
+        doc.write_text("Primer bloque de dominio.\n\nSegundo bloque distinto.",
+                       encoding="utf-8")
+        out = tmp_path / "raw.jsonl"
+        _run_cli(["digestor", "--mode", "knowledge", "--level", "completion",
+                  "--chunk-chars", "25", "--data", str(doc), "--output", str(out)])
+        rows = _rows(out)
+        assert rows and all("text" in r for r in rows)   # continued-pretraining

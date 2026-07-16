@@ -5,7 +5,7 @@
 > sobre cualquier modelo open-source, y lo sirve de principio a fin. **Sin nube. 0 €/consulta. 100% privado.**
 
 **Origen:** pipeline EXIST 2025 (detección de sexismo en memes) generalizado a una fábrica reutilizable.
-**Estado:** 564 tests · 0 fallos · 15 comandos CLI · Docker (CPU y GPU) · modelo base actual **Gemma 4 12B** a ~50 tok/s en RTX 4080 · contexto configurable hasta 64K (caché KV cuantizable) · RAG verificado · aprendizaje híbrido (feedback humano + reflexión) · Digestor multi-modo (clasificar/destilar/conocimiento) · compatible con frontends agénticos (Odysseus y Hermes).
+**Estado:** 570 tests · 0 fallos · 15 comandos CLI · Docker (CPU y GPU) · modelo base actual **Gemma 4 12B** a ~50 tok/s en RTX 4080 · contexto configurable hasta 64K (caché KV cuantizable) · RAG verificado · aprendizaje híbrido (feedback humano + reflexión) · Digestor multi-modo (clasificar/destilar/conocimiento) expuesto en el CLI · compatible con frontends agénticos (Odysseus y Hermes).
 
 ---
 
@@ -61,7 +61,9 @@ El Motor funciona con cualquier modelo de HuggingFace (Qwen, Llama, Mistral, Phi
 ## CLI — `fabrica_loras.py` (15 comandos)
 
 ```bash
-fabrica_loras digestor   --data datos.csv --task "..." --output dataset.jsonl
+fabrica_loras digestor   --data datos.csv --task "..." --output dataset.jsonl          # classify
+fabrica_loras digestor   --mode distill   --data ./charlas/ --output sft.jsonl          # charlas IA → SFT
+fabrica_loras digestor   --mode knowledge --data manual.md --level template --output qa.jsonl  # doc → Q&A
 fabrica_loras analyzer   --model google/gemma-4-12B-it
 fabrica_loras train      --model google/... --data dataset.jsonl --output adapters/mi_adapter/
 fabrica_loras vlm        --model Qwen/Qwen2-VL-2B --data ... --output ...
@@ -134,7 +136,7 @@ El servidor expone una API estilo OpenAI, así que **cualquier frontend compatib
 
 ## Tests
 
-564 tests · 0 fallos · tres capas (unitaria, integración E2E, comportamiento).
+570 tests · 0 fallos · tres capas (unitaria, integración E2E, comportamiento).
 
 ```bash
 PYTHONUTF8=1 python -m pytest tests/ -q       # suite completa

@@ -14,6 +14,14 @@ Uso como CLI:
         --task "Resume el siguiente texto en una frase." \
         --output dataset.jsonl --format chatml
 
+    # Destilar charlas con IAs (.md) → SFT (determinista, offline):
+    python fabrica_loras.py digestor --mode distill \
+        --data ./charlas/ --output sft.jsonl
+
+    # Digerir un documento → Q&A (standalone; --level auto usa el serve si está):
+    python fabrica_loras.py digestor --mode knowledge \
+        --data manual.md --level template --output qa.jsonl
+
 Estado de implementación
 -------------------------
   Fase 2 — DataDigestor     ✅ completado (9 formatos + semáforo)
@@ -71,8 +79,59 @@ except Exception:
 def _cmd_digestor(args: argparse.Namespace) -> None:
     """
     Convierte datos crudos en dataset.jsonl usando DataDigestor.
+
+    Modos (--mode):
+      classify  : datos etiquetados → clasificación. Requiere --task. Es el
+                  default y mantiene la retrocompatibilidad con EXIST.
+      distill   : .md de charlas con IAs → SFT ChatML. Determinista y offline,
+                  con higiene (quita fugas de identidad y descarta rechazos).
+      knowledge : documento → Q&A. Standalone por defecto; --level llm|auto usa
+                  el serve si está arrancado y degrada a plantilla con aviso.
     """
     from motor.digestor import DataDigestor, detect_file_type
+
+    mode = getattr(args, "mode", "classify")
+
+    # ── Modo distill: destilar charlas markdown → SFT ──────────────────
+    if mode == "distill":
+        digestor = DataDigestor(
+            output_format=args.format,
+            model_id=getattr(args, "model", None),
+            mode="distill",
+        )
+        digestor.from_markdown_dialogue(
+            args.data,
+            strip_identity=not getattr(args, "keep_identity", False),
+            skip_refusals=not getattr(args, "keep_refusals", False),
+        )
+        _digestor_export(digestor, args)
+        return
+
+    # ── Modo knowledge: documento → Q&A ────────────────────────────────
+    if mode == "knowledge":
+        digestor = DataDigestor(
+            output_format=args.format,
+            model_id=getattr(args, "model", None),
+            mode="knowledge",
+        )
+        digestor.from_document_knowledge(
+            args.data,
+            level=getattr(args, "level", "auto"),
+            chunk_chars=getattr(args, "chunk_chars", 1200),
+            pairs_per_chunk=getattr(args, "pairs_per_chunk", 2),
+            judge_url=getattr(args, "judge_url", None),
+            judge_model=getattr(args, "judge_model", None),
+        )
+        _digestor_export(digestor, args)
+        return
+
+    # ── Modo classify (default, retrocompatible con EXIST) ─────────────
+    if not args.task:
+        print("[ERROR] El modo 'classify' requiere --task (la instrucción de "
+              "clasificación).\n"
+              "        Para destilar charlas con IAs usa  --mode distill;\n"
+              "        para digerir un documento en Q&A usa --mode knowledge.")
+        sys.exit(1)
 
     # --- Parsear label_map ("0:NO,1:YES" → {0: "NO", 1: "YES"}) ---
     label_map = {}
@@ -159,6 +218,11 @@ def _cmd_digestor(args: argparse.Namespace) -> None:
             print(f"[ERROR] Tipo de archivo no soportado: {data_path}")
             sys.exit(1)
 
+    _digestor_export(digestor, args)
+
+
+def _digestor_export(digestor, args: argparse.Namespace) -> None:
+    """Exporta el dataset acumulado a --output (común a todos los modos)."""
     n = digestor.to_jsonl(args.output, shuffle=not args.no_shuffle,
                           deduplicate=not getattr(args, "no_dedup", False))
     print(f"\n✓ {n} ejemplos exportados a {args.output}")
@@ -1249,8 +1313,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Convierte datos crudos en dataset.jsonl para fine-tuning LoRA",
     )
     p_dig.add_argument("--data",       required=True,  help="Ruta al archivo o carpeta de datos")
-    p_dig.add_argument("--task",       required=True,  help="Descripción de la tarea para el LLM")
+    p_dig.add_argument("--task",       default=None,
+                       help="Instrucción de la tarea. OBLIGATORIA en --mode classify; "
+                            "ignorada en distill/knowledge (la respuesta es el dato).")
     p_dig.add_argument("--output",     required=True,  help="Ruta de salida del .jsonl")
+    p_dig.add_argument("--mode",       default="classify",
+                       choices=["classify", "distill", "knowledge"],
+                       help="Modo del Digestor. classify: datos etiquetados → clasificación "
+                            "(default, retrocompatible EXIST). distill: .md de charlas con "
+                            "IAs → SFT ChatML (determinista, offline, con higiene). "
+                            "knowledge: documento → Q&A (standalone; --level sube la calidad).")
     p_dig.add_argument("--label-col",  default=None,   help="Columna/campo de etiqueta")
     p_dig.add_argument("--label-map",  default=None,
                        help="Mapa de etiquetas: '0:NO,1:YES' o 'POSITIVE:POS,NEGATIVE:NEG'")
@@ -1281,6 +1353,29 @@ def _build_parser() -> argparse.ArgumentParser:
                             "Ej: Qwen/Qwen2.5-14B-Instruct. "
                             "Si se proporciona, el Digestor adapta el formato de salida "
                             "al chat template y capacidades de ese modelo.")
+    # --- Flags de --mode knowledge ---
+    p_dig.add_argument("--level", default="auto",
+                       choices=["completion", "template", "llm", "auto"],
+                       help="[knowledge] Nivel de calidad. completion: texto crudo "
+                            "(continued-pretraining). template: Q&A por plantilla "
+                            "(standalone). llm: Q&A redactado por el serve. auto (default): "
+                            "usa llm si hay endpoint, si no degrada a template con aviso.")
+    p_dig.add_argument("--judge-url", default=None,
+                       help="[knowledge] Endpoint OpenAI para --level llm/auto "
+                            "(default: MOTOR_JUDGE_URL o el serve local).")
+    p_dig.add_argument("--judge-model", default=None,
+                       help="[knowledge] Modelo del endpoint para --level llm/auto.")
+    p_dig.add_argument("--chunk-chars", type=int, default=1200,
+                       help="[knowledge] Tamaño de fragmento en caracteres (default: 1200).")
+    p_dig.add_argument("--pairs-per-chunk", type=int, default=2,
+                       help="[knowledge] Pares Q&A por fragmento en --level llm (default: 2).")
+    # --- Flags de --mode distill (opt-outs de higiene; el default protege calidad) ---
+    p_dig.add_argument("--keep-identity", action="store_true",
+                       help="[distill] NO quitar fugas de identidad del modelo frontera "
+                            "('Soy Claude…'). Por defecto se eliminan.")
+    p_dig.add_argument("--keep-refusals", action="store_true",
+                       help="[distill] NO descartar turnos que son un rechazo. "
+                            "Por defecto se descartan.")
     p_dig.set_defaults(func=_cmd_digestor)
 
     # --- Subcomando: trainer ---
