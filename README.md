@@ -5,7 +5,7 @@
 > sobre cualquier modelo open-source, y lo sirve de principio a fin. **Sin nube. 0 €/consulta. 100% privado.**
 
 **Origen:** pipeline EXIST 2025 (detección de sexismo en memes) generalizado a una fábrica reutilizable.
-**Estado:** 527 tests · 0 fallos · 15 comandos CLI · Docker (CPU y GPU) · modelo base actual **Gemma 4 12B** a ~50 tok/s en RTX 4080 · contexto configurable hasta 64K (caché KV cuantizable) · RAG verificado · aprendizaje híbrido (feedback humano + reflexión) · compatible con frontends agénticos (Odysseus y Hermes).
+**Estado:** 564 tests · 0 fallos · 15 comandos CLI · Docker (CPU y GPU) · modelo base actual **Gemma 4 12B** a ~50 tok/s en RTX 4080 · contexto configurable hasta 64K (caché KV cuantizable) · RAG verificado · aprendizaje híbrido (feedback humano + reflexión) · Digestor multi-modo (clasificar/destilar/conocimiento) · compatible con frontends agénticos (Odysseus y Hermes).
 
 ---
 
@@ -35,7 +35,7 @@ El Motor funciona con cualquier modelo de HuggingFace (Qwen, Llama, Mistral, Phi
 
 | Módulo | Función |
 |---|---|
-| `digestor.py` | DataDigestor: 18 formatos de entrada → JSONL. Semáforo de 5 checks. Detección de dominio. |
+| `digestor.py` | DataDigestor: 18 formatos → JSONL. Modos: `classify` (etiquetas), `distill` (charlas con IAs → SFT, con higiene), `knowledge` (documento → Q&A, standalone o con LLM opcional). Semáforo de 5 checks. |
 | `analyzer.py` | ModelAnalyzer: detecta arquitectura, elige `target_modules` y configuración. |
 | `trainer_llm.py` | LLMTrainer: LoRA (PEFT+TRL) sobre cualquier modelo. Soporta `gemma4_unified`. |
 | `trainer_vlm.py` | VLMTrainer: igual para modelos visión-lenguaje. |
@@ -134,7 +134,7 @@ El servidor expone una API estilo OpenAI, así que **cualquier frontend compatib
 
 ## Tests
 
-527 tests · 0 fallos · tres capas (unitaria, integración E2E, comportamiento).
+564 tests · 0 fallos · tres capas (unitaria, integración E2E, comportamiento).
 
 ```bash
 PYTHONUTF8=1 python -m pytest tests/ -q       # suite completa

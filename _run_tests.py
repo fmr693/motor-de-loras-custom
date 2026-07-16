@@ -37,6 +37,7 @@ DEV_TESTS = [
     "tests/test_lineage_guard.py",   # guard de linaje en promoción GGUF
     "tests/test_log_quality.py",     # filtro de calidad del interaction_log
     "tests/test_reflection.py",      # pase de reflexión (feedback implícito) + fusión DPO
+    "tests/test_digestor_distill.py", # Digestor: modos + destilación markdown (higiene)
 ]
 
 # Tests que requieren torch/peft/GPU (worker container, Python 3.11 + CUDA)

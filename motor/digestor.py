@@ -50,6 +50,30 @@ _CHATML_SYSTEM = (
     "Eres un asistente especializado. Responde de forma concisa y precisa."
 )
 
+# ---------------------------------------------------------------------------
+# Modos del Digestor — cada tipo de dato ENSEÑA distinto (reconversión jul 2026)
+# ---------------------------------------------------------------------------
+#   classify  : dato supervisado (CSV/JSON+etiqueta) → user=tarea+texto,
+#               assistant=etiqueta. El diseño original (caso EXIST). Determinista.
+#   distill   : diálogo ya formado (charlas con otras IAs) → se preserva la
+#               respuesta COMPLETA como target. Determinista (parseo + higiene).
+#   knowledge : documento en bruto (legal, README, apuntes) → pares Q&A. Niveles
+#               1-2 deterministas (texto crudo / plantilla); nivel 3 (Q&A
+#               generado por LLM) es una MEJORA opcional que degrada con aviso.
+#   vlm       : imágenes + etiquetas/manifiesto → dataset visión-lenguaje.
+#
+# Regla de oro: el Digestor es STANDALONE. Solo `knowledge` nivel 3 usa un LLM,
+# y siempre de forma opcional (equipos offline deben funcionar). La CALIDAD del
+# dato de salida prima sobre la cantidad.
+_MODE_SYSTEM_PROMPTS: Dict[str, str] = {
+    "classify":  _CHATML_SYSTEM,
+    "distill":   "Eres un asistente experto: riguroso, claro y directo.",
+    "knowledge": "Eres un asistente experto en el dominio del documento. "
+                 "Responde con precisión y solo con lo que el material sustenta.",
+    "vlm":       "Eres un asistente de visión que analiza imágenes con precisión.",
+}
+_VALID_MODES = set(_MODE_SYSTEM_PROMPTS)
+
 _ALPACA_TEMPLATE = {
     "instruction": "",
     "input": "",
@@ -579,15 +603,271 @@ def _api_summary_to_user_request(summary: str, method: str, path: str, api_title
 # DataDigestor
 # ---------------------------------------------------------------------------
 
+# ===========================================================================
+# Destilación de diálogos markdown (modo distill) — parseo + higiene, SIN LLM
+# ---------------------------------------------------------------------------
+# Convierte transcripciones crudas de charlas con IAs (Claude/Gemini/ChatGPT,
+# session.md…) en ChatML. Todo determinista (regex + reglas): funciona offline.
+# La CALIDAD prima → higiene agresiva (quita fugas de identidad y rechazos) y
+# solo empareja turnos user→assistant limpios.
+# ===========================================================================
+
+_MD_USER_ROLES = {
+    "human", "user", "you", "me", "yo", "tu", "tú", "prompt", "pregunta",
+    "usuario", "q",
+}
+_MD_ASSISTANT_ROLES = {
+    "assistant", "ai", "bot", "claude", "chatgpt", "gpt", "gemini", "copilot",
+    "model", "modelo", "respuesta", "asistente", "llm", "a",
+}
+
+# Fuga de identidad: frases donde el modelo frontera declara qué es. Entrenar
+# con ellas le enseña una identidad equivocada al modelo local. Se elimina la
+# FRASE que las contiene (quirúrgico), no la línea entera — así una respuesta
+# útil en la misma línea sobrevive ("Soy Claude. La respuesta es 4." → "La
+# respuesta es 4.").
+_IDENTITY_PHRASE_RE = re.compile(
+    r"(?i)("
+    r"as an ai(?:\s+(?:language model|assistant))?"
+    r"|as a large language model"
+    r"|i'?m\s+(?:claude|chatgpt|gemini|an ai|a large language model)"
+    r"|i am\s+(?:claude|chatgpt|gemini|an ai|a large language model)"
+    r"|como\s+(?:una?\s+)?(?:ia|modelo de lenguaje|asistente de ia|"
+    r"inteligencia artificial|modelo de ia)"
+    r"|soy\s+(?:claude|chatgpt|gemini|una ia|un modelo|un asistente de ia)"
+    r")"
+)
+
+# Rechazo: turnos del asistente que son un "no puedo ayudarte". De bajo valor
+# (o contraproducentes) para SFT → se descartan.
+_REFUSAL_RE = re.compile(
+    r"(?i)("
+    r"i can'?t (?:help|assist|provide|do that|comply)"
+    r"|i'?m (?:not able|unable) to"
+    r"|i cannot (?:help|assist|provide|comply|fulfill)"
+    r"|i'?m sorry,?\s+but i (?:can'?t|cannot)"
+    r"|no puedo ayudarte con"
+    r"|lo siento,?\s+(?:pero )?no puedo"
+    r"|no me es posible (?:ayudar|proporcionar)"
+    r")"
+)
+
+
+def _md_role_match(line: str):
+    """Si `line` es un marcador de rol (## Human / **User:** / Assistant:),
+    devuelve (rol_canónico, contenido_inline); si no, None."""
+    s = line.strip()
+    if not s:
+        return None
+    m = re.match(
+        r"^[\s#>*_\-]*"                                    # decoración inicial
+        r"([A-Za-zÁÉÍÓÚáéíóúñÑ]{1,20})"                    # nombre del rol
+        r"[\s*_]*"                                          # emphasis de cierre
+        r"(:)?"                                             # ':' opcional
+        r"[\s*_]*"                                          # más emphasis
+        r"(.*)$",                                           # contenido inline
+        s,
+    )
+    if not m:
+        return None
+    name, colon, inline = m.group(1).lower(), m.group(2), m.group(3).strip()
+    if name in _MD_USER_ROLES:
+        role = "user"
+    elif name in _MD_ASSISTANT_ROLES:
+        role = "assistant"
+    else:
+        return None
+    # Sin ':' y con texto detrás → es una frase que empieza por esa palabra,
+    # no un marcador de rol (evita falsos positivos tipo "You should…").
+    if not colon and inline:
+        return None
+    return role, inline
+
+
+def _split_sentences(text: str) -> List[str]:
+    """División de oraciones tolerante (ES/EN): corta tras . ! ? …"""
+    return re.split(r"(?<=[.!?…])\s+", text)
+
+
+def _strip_identity(text: str) -> str:
+    """Elimina las FRASES con fuga de identidad, preservando el resto de cada
+    párrafo (calidad > cantidad: no se tira contenido útil por vecindad)."""
+    out_lines: List[str] = []
+    for para in text.split("\n"):
+        if not para.strip():
+            out_lines.append(para)
+            continue
+        kept = [s for s in _split_sentences(para)
+                if not _IDENTITY_PHRASE_RE.search(s)]
+        out_lines.append(" ".join(kept).strip())
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out_lines)).strip()
+
+
+def _is_refusal(text: str) -> bool:
+    """True si el turno está dominado por un rechazo (corto + patrón)."""
+    t = text.strip()
+    return bool(_REFUSAL_RE.search(t)) and len(t) < 400
+
+
+def _parse_md_dialogue(text: str):
+    """Parsea una transcripción markdown a lista de (rol, contenido).
+
+    Fusiona turnos consecutivos del mismo rol; ignora el preámbulo anterior al
+    primer marcador."""
+    turns: List = []
+    cur_role = None
+    cur_buf: List[str] = []
+
+    def _flush():
+        if cur_role and cur_buf:
+            content = "\n".join(cur_buf).strip()
+            if content:
+                turns.append([cur_role, content])
+
+    for line in text.splitlines():
+        mm = _md_role_match(line)
+        if mm:
+            _flush()
+            cur_role, inline = mm
+            cur_buf = [inline] if inline else []
+        elif cur_role:
+            cur_buf.append(line)
+        # líneas antes del primer marcador → preámbulo, se ignoran
+    _flush()
+
+    # Fusionar turnos consecutivos del mismo rol (defensivo)
+    merged: List = []
+    for role, content in turns:
+        if merged and merged[-1][0] == role:
+            merged[-1][1] += "\n\n" + content
+        else:
+            merged.append([role, content])
+    return merged
+
+
+# ===========================================================================
+# Modo conocimiento — documento en bruto → dataset entrenable
+# ---------------------------------------------------------------------------
+# Niveles (calidad creciente):
+#   1 completion : el texto crudo como target de continued-pretraining {"text"}.
+#   2 template   : Q&A por plantilla (¿Qué dice sobre X? → chunk). Determinista.
+#   3 llm        : un LLM redacta Q&A naturales. MEJORA opcional (endpoint HTTP).
+# Los niveles 1-2 son 100% STANDALONE. El 3 degrada al 2 con aviso si no hay
+# endpoint (equipos offline nunca se quedan sin dataset).
+# ===========================================================================
+
+def _knowledge_llm_url() -> str:
+    return os.environ.get("MOTOR_JUDGE_URL", "http://localhost:8001/v1").rstrip("/")
+
+
+def _knowledge_llm_model() -> str:
+    return os.environ.get("MOTOR_JUDGE_MODEL", "gemma-4-12B-it-Q4_K_M.gguf")
+
+
+def _llm_reachable(url: Optional[str] = None, timeout: int = 3) -> bool:
+    """True si el endpoint del generador responde en /health. Nunca lanza."""
+    import urllib.request
+    base = (url or _knowledge_llm_url())
+    health = base.rsplit("/v1", 1)[0].rstrip("/") + "/health"
+    try:
+        with urllib.request.urlopen(health, timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def _llm_chat(messages: List[dict], *, max_tokens: int = 900,
+              temperature: float = 0.3, timeout: int = 180,
+              url: Optional[str] = None, model: Optional[str] = None) -> str:
+    """Llamada de chat OpenAI-compatible (urllib stdlib, sin dependencias)."""
+    import urllib.request
+    body = json.dumps({
+        "model": model or _knowledge_llm_model(), "messages": messages,
+        "max_tokens": max_tokens, "temperature": temperature, "stream": False,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        (url or _knowledge_llm_url()) + "/chat/completions", data=body,
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        data = json.loads(r.read().decode("utf-8"))
+    return data["choices"][0]["message"]["content"] or ""
+
+
+def _chunk_text(text: str, chunk_chars: int = 1200) -> List[str]:
+    """Trocea texto por límites de párrafo, acumulando hasta ~chunk_chars.
+    Un párrafo más largo que el chunk se parte en duro."""
+    chunks: List[str] = []
+    buf = ""
+    for para in re.split(r"\n\s*\n", text):
+        para = para.strip()
+        if not para:
+            continue
+        if len(para) > chunk_chars:
+            if buf:
+                chunks.append(buf)
+                buf = ""
+            for i in range(0, len(para), chunk_chars):
+                chunks.append(para[i:i + chunk_chars])
+        elif len(buf) + len(para) + 2 <= chunk_chars:
+            buf = (buf + "\n\n" + para).strip()
+        else:
+            if buf:
+                chunks.append(buf)
+            buf = para
+    if buf:
+        chunks.append(buf)
+    return chunks
+
+
+def _chunk_topic(chunk: str) -> str:
+    """Extrae un 'tema' del chunk para la pregunta plantilla: un encabezado
+    markdown si lo hay, o las primeras palabras significativas."""
+    for line in chunk.splitlines():
+        h = re.match(r"^\s*#{1,6}\s+(.{3,80})", line)
+        if h:
+            return h.group(1).strip().rstrip(":.")
+    words = re.findall(r"[\wÁÉÍÓÚáéíóúñÑ]+", chunk)
+    return " ".join(words[:6]) if words else "el contenido"
+
+
+def _extract_json_obj(text: str) -> Optional[dict]:
+    """Extrae el primer objeto JSON del texto del LLM (tolerante a fences)."""
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.MULTILINE).strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:i + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
 class DataDigestor:
     """
     Convierte cualquier fuente de datos en dataset.jsonl para fine-tuning LoRA.
 
     Parámetros
     ----------
-    task : str
-        Descripción de la tarea que el LLM debe aprender.
-        Ej: "¿Es este contrato abusivo? Responde SÍ o NO."
+    mode : "classify" | "distill" | "knowledge" | "vlm"
+        Cómo se digiere el dato (ver constantes de modos). Por defecto
+        "classify" (comportamiento histórico). En distill/knowledge/vlm el
+        objetivo es la respuesta completa, no una etiqueta.
+    task : str, opcional
+        Descripción de la tarea que el LLM debe aprender. SOLO se usa en modo
+        "classify" (enmarca el mensaje user). Ej: "¿Es este contrato abusivo?
+        Responde SÍ o NO." En los demás modos es innecesario.
     label_col : str, opcional
         Nombre de la columna (CSV/JSON) o campo que contiene la etiqueta.
         Si es None el Digestor opera en modo extracción (sin etiquetas).
@@ -607,7 +887,7 @@ class DataDigestor:
 
     def __init__(
         self,
-        task: str,
+        task: Optional[str] = None,
         label_col: Optional[str] = None,
         label_map: Optional[Dict[Any, str]] = None,
         output_format: str = "chatml",
@@ -617,15 +897,21 @@ class DataDigestor:
         model_id: Optional[str] = None,
         auto_enrich: bool = True,
         domain: Optional[str] = None,
+        mode: str = "classify",
     ):
         if output_format not in ("chatml", "alpaca"):
             raise ValueError(f"output_format debe ser 'chatml' o 'alpaca', got: {output_format!r}")
+        if mode not in _VALID_MODES:
+            raise ValueError(f"mode debe ser uno de {sorted(_VALID_MODES)}, got: {mode!r}")
 
-        self.task = task.strip()
+        self.mode = mode
+        # `task` solo se usa en modo classify (prefijo del mensaje user). En
+        # distill/knowledge/vlm el objetivo es la respuesta completa → opcional.
+        self.task = (task or "").strip()
         self.label_col = label_col
         self.label_map = label_map or {}
         self.output_format = output_format
-        self.system_prompt = system_prompt or _CHATML_SYSTEM
+        self.system_prompt = system_prompt or _MODE_SYSTEM_PROMPTS[mode]
         self.skip_nulls = skip_nulls
         self.null_placeholder = null_placeholder
 
@@ -3115,6 +3401,248 @@ learning_rate: 2e-4
         print(f"[DataDigestor] Conversaciones cargadas: {added} ejemplos | {skipped} omitidos")
         return self
 
+    def from_markdown_dialogue(
+        self,
+        path: Union[str, Path],
+        strip_identity: bool = True,
+        skip_refusals: bool = True,
+        min_turn_chars: int = 2,
+        encoding: str = "utf-8",
+    ) -> "DataDigestor":
+        """
+        Destila transcripciones markdown de charlas con IAs → ChatML (modo distill).
+
+        El flujo estrella de la reconversión: exportas una charla con Claude/
+        Gemini/ChatGPT (o un session.md) y se convierte en dataset SFT. Detecta
+        los marcadores de rol habituales (## Human / **User:** / Assistant: /
+        You: / Claude: / ChatGPT: / Gemini:) y construye pares user→assistant.
+
+        Todo DETERMINISTA (regex + reglas): funciona offline, sin LLM.
+
+        Higiene (calidad > cantidad):
+          - strip_identity: quita líneas de identidad del modelo frontera
+            ("As an AI…", "Soy Claude…") que enseñarían identidad equivocada.
+          - skip_refusals: descarta turnos del asistente que son un rechazo.
+          - min_turn_chars: solo descarta turnos casi vacíos (default 2). La
+            longitud NO es señal de calidad: una respuesta concisa correcta
+            ("Son 4.") es dato de primera. La higiene real es semántica.
+        Solo se emiten pares user→assistant limpios y en orden; los turnos
+        huérfanos o descartados no rompen el ejemplo.
+
+        Parámetros
+        ----------
+        path : str | Path
+            Archivo .md/.txt/.markdown o CARPETA (procesa todos, recursivo).
+        """
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"[DataDigestor] Ruta no encontrada: {path}")
+
+        if path.is_dir():
+            files = sorted(
+                p for p in path.rglob("*")
+                if p.suffix.lower() in (".md", ".markdown", ".txt")
+            )
+        else:
+            files = [path]
+        if not files:
+            print(f"[DataDigestor] Sin archivos .md/.txt en {path}")
+            return self
+
+        added = skipped = dropped_turns = 0
+
+        for f in files:
+            try:
+                text = f.read_text(encoding=encoding)
+            except Exception as exc:
+                print(f"  [!] No se pudo leer {f.name}: {exc}")
+                skipped += 1
+                continue
+
+            turns = _parse_md_dialogue(text)
+            if not turns:
+                skipped += 1
+                continue
+
+            # Higiene por turno → (rol, contenido|None); None = descartado
+            clean: List = []
+            for role, content in turns:
+                if strip_identity:
+                    content = _strip_identity(content)
+                if role == "assistant" and skip_refusals and _is_refusal(content):
+                    dropped_turns += 1
+                    clean.append((role, None))
+                    continue
+                if len(content.strip()) < min_turn_chars:
+                    clean.append((role, None))
+                    continue
+                clean.append((role, content.strip()))
+
+            # Emparejar user→assistant limpios y en orden. Un turno descartado
+            # (None) invalida el par pendiente → nunca se emite un par a medias.
+            messages = [{"role": "system", "content": self.system_prompt}]
+            pending_user = None
+            for role, content in clean:
+                if content is None:
+                    pending_user = None
+                    continue
+                if role == "user":
+                    pending_user = content
+                elif role == "assistant" and pending_user is not None:
+                    messages.append({"role": "user", "content": pending_user})
+                    messages.append({"role": "assistant", "content": content})
+                    pending_user = None
+
+            if len(messages) >= 3:   # system + al menos un par
+                self._examples.append({"messages": messages})
+                added += 1
+            else:
+                skipped += 1
+
+        print(
+            f"[DataDigestor] Destilación markdown: {added} conversaciones "
+            f"({skipped} omitidas, {dropped_turns} turnos descartados por "
+            f"higiene) de {len(files)} archivo(s)."
+        )
+        return self
+
+    def from_document_knowledge(
+        self,
+        path: Union[str, Path],
+        level: str = "auto",
+        chunk_chars: int = 1200,
+        pairs_per_chunk: int = 2,
+        encoding: str = "utf-8",
+        judge_url: Optional[str] = None,
+        judge_model: Optional[str] = None,
+    ) -> "DataDigestor":
+        """
+        Convierte un documento en bruto (legal, README, apuntes) en dataset.
+
+        Niveles de calidad (ver constantes del modo conocimiento):
+          - "completion" : texto crudo → {"text": chunk} (continued-pretraining).
+          - "template"   : Q&A por plantilla (standalone, determinista).
+          - "llm"        : un LLM redacta Q&A naturales (mejor calidad).
+          - "auto"       : usa "llm" si hay endpoint; si no, "template" con aviso.
+
+        STANDALONE: completion/template no tocan la red. "llm"/"auto" degradan a
+        "template" con aviso claro si el endpoint no responde (Opción A: el
+        embudo nunca se atasca). Solo maneja .txt/.md (documentos de texto);
+        PDF/DOCX: extrae texto antes con from_pdf/from_docx o pásalos como .txt.
+
+        Parámetros
+        ----------
+        path : str | Path
+            Archivo .txt/.md/.markdown o carpeta (recursivo).
+        """
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"[DataDigestor] Ruta no encontrada: {path}")
+        if level not in ("completion", "template", "llm", "auto"):
+            raise ValueError("level debe ser completion|template|llm|auto, "
+                             f"got: {level!r}")
+
+        if path.is_dir():
+            files = sorted(
+                p for p in path.rglob("*")
+                if p.suffix.lower() in (".txt", ".md", ".markdown")
+            )
+        else:
+            files = [path]
+        if not files:
+            print(f"[DataDigestor] Sin documentos .txt/.md en {path}")
+            return self
+
+        # Resolver nivel efectivo (Opción A: degradar con aviso)
+        eff = level
+        if level in ("llm", "auto"):
+            if _llm_reachable(judge_url):
+                eff = "llm"
+            else:
+                eff = "template"
+                if level == "llm":
+                    print("[DataDigestor] AVISO: nivel 'llm' pedido pero el "
+                          "endpoint no responde → degradando a plantilla "
+                          "(nivel 2, standalone). Arranca el serve para calidad "
+                          "máxima.")
+                else:
+                    print("[DataDigestor] Sin endpoint LLM → conocimiento por "
+                          "plantilla (nivel 2, standalone). Con el serve "
+                          "arrancado, 'auto' sube a nivel 3 (Q&A generado).")
+        print(f"[DataDigestor] Modo conocimiento — nivel efectivo: '{eff}'.")
+
+        added = 0
+        for f in files:
+            try:
+                text = _clean_text(f.read_text(encoding=encoding))
+            except Exception as exc:
+                print(f"  [!] No se pudo leer {f.name}: {exc}")
+                continue
+            for chunk in _chunk_text(text, chunk_chars):
+                if eff == "completion":
+                    self._examples.append({"text": chunk})
+                    added += 1
+                elif eff == "template":
+                    q = f"¿Qué explica el documento sobre «{_chunk_topic(chunk)}»?"
+                    self._examples.append(self._knowledge_chatml(q, chunk))
+                    added += 1
+                else:  # llm
+                    qa = []
+                    try:
+                        qa = self._llm_qa_pairs(chunk, pairs_per_chunk,
+                                                judge_url, judge_model)
+                    except Exception as exc:
+                        print(f"  [!] Generación LLM falló en un chunk ({exc}); "
+                              "plantilla para ese fragmento.")
+                    if not qa:   # sin pares válidos → plantilla como red de seguridad
+                        qa = [(f"¿Qué explica el documento sobre "
+                               f"«{_chunk_topic(chunk)}»?", chunk)]
+                    for q, a in qa:
+                        self._examples.append(self._knowledge_chatml(q, a))
+                        added += 1
+
+        print(f"[DataDigestor] Conocimiento: {added} ejemplos de "
+              f"{len(files)} documento(s).")
+        return self
+
+    def _knowledge_chatml(self, question: str, answer: str) -> dict:
+        """Ejemplo ChatML para el modo conocimiento (system + user + assistant)."""
+        return {"messages": [
+            {"role": "system",    "content": self.system_prompt},
+            {"role": "user",      "content": question},
+            {"role": "assistant", "content": answer},
+        ]}
+
+    def _llm_qa_pairs(self, chunk: str, n: int,
+                      url: Optional[str], model: Optional[str]) -> List:
+        """Genera hasta n pares (pregunta, respuesta) de un chunk con el LLM.
+        Devuelve [] si la respuesta no es parseable (el llamante degrada)."""
+        sys = (
+            "Eres un generador de datos de entrenamiento SFT. A partir del "
+            "PASAJE, redacta preguntas naturales que un usuario real haría y "
+            "cuya respuesta esté CONTENIDA en el pasaje. Cada respuesta debe "
+            "ser precisa y autocontenida (NO digas 'según el pasaje' ni "
+            "'el documento dice'). Calidad sobre cantidad: mejor 1 par "
+            "excelente que 3 forzados.\n"
+            "Devuelve SOLO un objeto JSON válido, sin texto alrededor:\n"
+            '{"pairs": [{"q": "<pregunta>", "a": "<respuesta>"}]}'
+        )
+        user = f"Genera hasta {n} pares.\n\nPASAJE:\n{chunk}"
+        raw = _llm_chat(
+            [{"role": "system", "content": sys},
+             {"role": "user", "content": user}],
+            url=url, model=model,
+        )
+        data = _extract_json_obj(raw)
+        out: List = []
+        if data:
+            for p in (data.get("pairs") or [])[:n]:
+                q = str(p.get("q", "")).strip()
+                a = str(p.get("a", "")).strip()
+                if q and a:
+                    out.append((q, a))
+        return out
+
     def from_docx(
         self,
         path: Union[str, Path],
@@ -3995,6 +4523,8 @@ learning_rate: 2e-4
         """
         import random
         task = self.task
+        if not task:
+            return ""   # modos distill/knowledge/vlm no enmarcan con tarea
         if len(self._examples) > 0:
             # Quitar puntuacion final para construir variantes limpias
             core = task.rstrip(" .")
@@ -4019,7 +4549,8 @@ learning_rate: 2e-4
         - Si el modelo NO soporta system prompt (Mistral, Llama 2 antiguo):
           El contexto de sistema se inyecta en el mensaje user como prefijo.
         """
-        user_content = f"{self._task_variation()}\n\n{text}"
+        _tv = self._task_variation()
+        user_content = f"{_tv}\n\n{text}" if _tv else text
         messages = []
 
         if self._model_supports_system:
