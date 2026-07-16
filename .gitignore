@@ -62,6 +62,9 @@ gpu_build*.log
 # Logs de interacción en runtime (datos, no código — los genera el servidor)
 logs/*.jsonl
 
+# Salida del pase de reflexión (datos derivados del log, no código)
+datasets/reflection/
+
 # Bitacora de trabajo (privada, no publicar)
 SESION.md
 SESION.backup.md

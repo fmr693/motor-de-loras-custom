@@ -617,6 +617,35 @@ def _raise_inference_error(exc: Exception, context: str = "Error en inferencia")
     raise HTTPException(status_code=500, detail=f"{context}: {exc}")
 
 
+def _oai_conversation_key(messages: list) -> tuple:
+    """Deriva (session_id, turn) para una petición /v1 sin estado.
+
+    El endpoint /v1 es stateless: cada llamada trae toda la conversación en
+    `messages`, pero nosotros solo logueamos el último turno. Sin enlace, el
+    pase de reflexión no puede leer la reacción del usuario entre turnos. Aquí
+    reconstruimos ese enlace: el fingerprint de la conversación es el hash del
+    PRIMER mensaje de usuario (estable entre turnos de la misma charla), y el
+    turno es el nº de mensajes de usuario en la petición. No es perfecto (dos
+    conversaciones que empiezan idénticas colisionan; editar el historial lo
+    rompe), pero enlaza el caso común de Odysseus/Hermes.
+    """
+    import hashlib
+
+    def _mget(m, k):
+        return m.get(k) if isinstance(m, dict) else getattr(m, k, None)
+
+    user_texts = [
+        _oai_content_to_text(_mget(m, "content"))
+        for m in messages if _mget(m, "role") == "user"
+    ]
+    user_texts = [t for t in user_texts if t and t.strip()]
+    if not user_texts:
+        return None, None
+    first = user_texts[0].strip()[:400]
+    sid = "oai-" + hashlib.sha1(first.encode("utf-8")).hexdigest()[:12]
+    return sid, len(user_texts)
+
+
 class _OAIRequest(_OAIBase):  # type: ignore
     # Optional: el Deep Research de Odysseus sondea con model=null y el 422
     # resultante mataba la investigación. Solo servimos un modelo: se ignora.
@@ -1154,7 +1183,7 @@ def create_app() -> "fastapi.FastAPI":
         const fbDiv = document.createElement('div');
         fbDiv.className = 'fb-row';
         fbDiv.dataset.id = interactionId;
-        fbDiv.innerHTML = `<button class="fb-btn" title="Buena respuesta" onclick="sendFeedback('${{interactionId}}',1,this)">\ud83d\udc4d</button><button class="fb-btn" title="Mala respuesta" onclick="sendFeedback('${{interactionId}}',-1,this)">\ud83d\udc4e</button>`;
+        fbDiv.innerHTML = `<button class="fb-btn" style="color:#16a34a;border-color:#16a34a" title="Marca esta respuesta como acierto (alimenta el aprendizaje)" onclick="sendFeedback('${{interactionId}}',1,this)">&#10003; Marcar como acierto</button><button class="fb-btn" style="color:#dc2626;border-color:#dc2626" title="Marca esta respuesta como error (alimenta el aprendizaje)" onclick="sendFeedback('${{interactionId}}',-1,this)">&#10007; Marcar como error</button>`;
         thinking.parentElement.appendChild(fbDiv);
       }} else {{
         thinking.textContent = 'Error: ' + (d.detail || r.status);
@@ -1175,8 +1204,8 @@ def create_app() -> "fastapi.FastAPI":
         body: JSON.stringify({{ interaction_id: interactionId, rating }})
       }});
       row.innerHTML = rating === 1
-        ? '<span style="font-size:12px;color:#4ade80">✓ Gracias por el feedback</span>'
-        : '<span style="font-size:12px;color:#f87171">✓ Gracias por el feedback</span>';
+        ? '<span style="font-size:12px;color:#16a34a">&#10003; Guardado como acierto</span>'
+        : '<span style="font-size:12px;color:#dc2626">&#10007; Guardado como error</span>';
     }} catch(e) {{
       row.innerHTML = '<span style="font-size:11px;color:#888">Error al enviar feedback</span>';
     }}
@@ -1693,9 +1722,12 @@ def create_app() -> "fastapi.FastAPI":
         model_name = str(Path(_state.model_path).name)
         elapsed_ms = int((time.time() - t0) * 1000)
 
+        _conv_sid, _conv_turn = _oai_conversation_key(messages)
         _log_interaction(
             chat_id, user_msg, response_text,
             ms=elapsed_ms,
+            session_id=_conv_sid,
+            turn=_conv_turn,
             endpoint="v1/chat/completions",
             extra={"finish_reason": finish_reason,
                    **({"tool_calls": tool_calls} if tool_calls else {})},

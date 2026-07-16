@@ -5,7 +5,7 @@
 > sobre cualquier modelo open-source, y lo sirve de principio a fin. **Sin nube. 0 €/consulta. 100% privado.**
 
 **Origen:** pipeline EXIST 2025 (detección de sexismo en memes) generalizado a una fábrica reutilizable.
-**Estado:** 513 tests · 0 fallos · 14 comandos CLI · Docker (CPU y GPU) · modelo base actual **Gemma 4 12B** a ~50 tok/s en RTX 4080 · contexto configurable hasta 64K (caché KV cuantizable) · RAG verificado · compatible con frontends agénticos (Odysseus y Hermes).
+**Estado:** 527 tests · 0 fallos · 15 comandos CLI · Docker (CPU y GPU) · modelo base actual **Gemma 4 12B** a ~50 tok/s en RTX 4080 · contexto configurable hasta 64K (caché KV cuantizable) · RAG verificado · aprendizaje híbrido (feedback humano + reflexión) · compatible con frontends agénticos (Odysseus y Hermes).
 
 ---
 
@@ -31,7 +31,7 @@ El Motor funciona con cualquier modelo de HuggingFace (Qwen, Llama, Mistral, Phi
 
 ---
 
-## Arquitectura — `motor/` (19 módulos)
+## Arquitectura — `motor/` (20 módulos)
 
 | Módulo | Función |
 |---|---|
@@ -46,7 +46,8 @@ El Motor funciona con cualquier modelo de HuggingFace (Qwen, Llama, Mistral, Phi
 | `continual.py` | ContinualLearner: replay buffer, rollback automático, registro. |
 | `continual_cycle.py` | Ciclo autónomo: digest → train → export → benchmark → promote. |
 | `benchmark_worker.py` | Valida un GGUF con 5 tareas (umbral 80%) antes de promover. |
-| `dpo_trainer.py` | DPOBuilder: interaction_log → pares chosen/rejected → DPO/ORPO. |
+| `dpo_trainer.py` | DPOBuilder: interaction_log → pares chosen/rejected → DPO/ORPO. Fusiona feedback humano + reflexión. |
+| `reflection.py` | ReflectionJudge: feedback implícito por LLM-juez (relee el log, infiere aciertos/errores). |
 | `log_quality.py` | Filtro de calidad del interaction_log (vacíos, basura, truncados, duplicados). |
 | `hardware.py` | `detect_hardware()`: perfiles de entrenamiento e inferencia según GPU/CPU. |
 | `odysseus_bridge.py` | Puente con Odysseus: MCP tools + CL bridge + watchdog de promoción. |
@@ -57,7 +58,7 @@ El Motor funciona con cualquier modelo de HuggingFace (Qwen, Llama, Mistral, Phi
 
 ---
 
-## CLI — `fabrica_loras.py` (14 comandos)
+## CLI — `fabrica_loras.py` (15 comandos)
 
 ```bash
 fabrica_loras digestor   --data datos.csv --task "..." --output dataset.jsonl
@@ -68,7 +69,8 @@ fabrica_loras export     --adapter ... --output ... [--format gguf]
 fabrica_loras chat       --model adapters/... [--base-model ...]
 fabrica_loras serve      --model modelos/mi_modelo.gguf --host 0.0.0.0
 fabrica_loras learn      --adapter ... --auto --log logs/interaction_log.jsonl
-fabrica_loras dpo        --log logs/interaction_log.jsonl --output ... --base-model ...
+fabrica_loras reflect    --log logs/interaction_log.jsonl --out datasets/reflection
+fabrica_loras dpo        --log logs/interaction_log.jsonl --output ... --base-model ... [--reflection-dir datasets/reflection]
 fabrica_loras cycle      [--only-step digest|train|export|benchmark|promote]
 fabrica_loras odysseus   [--mcp-only|--cl-only|--watchdog-only]
 fabrica_loras convert-dataset --input ... --framework llamafactory|unsloth|axolotl
@@ -132,7 +134,7 @@ El servidor expone una API estilo OpenAI, así que **cualquier frontend compatib
 
 ## Tests
 
-513 tests · 0 fallos · tres capas (unitaria, integración E2E, comportamiento).
+527 tests · 0 fallos · tres capas (unitaria, integración E2E, comportamiento).
 
 ```bash
 PYTHONUTF8=1 python -m pytest tests/ -q       # suite completa

@@ -1585,7 +1585,45 @@ def _build_parser() -> argparse.ArgumentParser:
         "--cache-dir", default=None, dest="cache_dir",
         help="Directorio de caché HuggingFace (opcional)",
     )
+    p_dpo.add_argument(
+        "--reflection-dir", default=None, dest="reflection_dir",
+        help="Directorio con la salida de 'reflect' (feedback implícito): "
+             "fusiona etiquetas inferidas y pares de corrección con el "
+             "feedback humano (que tiene prioridad).",
+    )
     p_dpo.set_defaults(func=_cmd_dpo)
+
+    # --- Subcomando: reflect ---
+    p_ref = subparsers.add_parser(
+        "reflect",
+        help="Pase de reflexión: infiere feedback implícito del log con un "
+             "LLM-juez (aprendizaje híbrido, estilo Hermes).",
+    )
+    p_ref.add_argument(
+        "--log", required=True,
+        help="Ruta al interaction_log.jsonl del servidor",
+    )
+    p_ref.add_argument(
+        "--out", default="datasets/reflection", dest="out",
+        help="Directorio de salida (reflection_labels.jsonl + "
+             "reflection_pairs.jsonl). Default: datasets/reflection",
+    )
+    p_ref.add_argument(
+        "--min-confidence", type=float, default=0.6, dest="min_confidence",
+        help="Confianza mínima del juez para aceptar una etiqueta (0-1, "
+             "default: 0.6)",
+    )
+    p_ref.add_argument(
+        "--judge-url", default=None, dest="judge_url",
+        help="Endpoint OpenAI del modelo juez (o MOTOR_JUDGE_URL; default "
+             "http://localhost:8001/v1)",
+    )
+    p_ref.add_argument(
+        "--judge-model", default=None, dest="judge_model",
+        help="ID del modelo juez (o MOTOR_JUDGE_MODEL). Puede ser un modelo "
+             "más fuerte que el principal para juzgar mejor.",
+    )
+    p_ref.set_defaults(func=_cmd_reflect)
 
     # --- Subcomando: cycle ---
     p_cycle = subparsers.add_parser(
@@ -1655,6 +1693,38 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 # ===========================================================================
+# COMANDO — reflect (feedback implícito por LLM-juez, aprendizaje híbrido)
+# ===========================================================================
+
+def _cmd_reflect(args: argparse.Namespace) -> None:
+    """Relee el log e infiere feedback implícito (aciertos/errores) con un
+    LLM-juez, sin necesidad de clics. Complementa al feedback explícito; el
+    resultado se fusiona en DPO con `dpo --reflection-dir`."""
+    import os as _os
+    from motor.reflection import ReflectionJudge, format_report
+
+    if args.judge_url:
+        _os.environ["MOTOR_JUDGE_URL"] = args.judge_url
+    if args.judge_model:
+        _os.environ["MOTOR_JUDGE_MODEL"] = args.judge_model
+
+    judge = ReflectionJudge(args.log, min_confidence=args.min_confidence)
+    try:
+        result = judge.run()
+    except FileNotFoundError as exc:
+        print(f"[ERROR] {exc}")
+        sys.exit(1)
+
+    print(format_report(result))
+    paths = judge.write(result, args.out)
+    print(f"[reflect] etiquetas → {paths['labels']}")
+    print(f"[reflect] pares     → {paths['pairs']}")
+    print("[reflect] Úsalo en DPO con: "
+          f"fabrica_loras.py dpo --log {args.log} "
+          f"--reflection-dir {args.out} ...")
+
+
+# ===========================================================================
 # SECCIÓN 10: COMANDO — dpo (S10.4: DPO pipeline desde feedback humano)
 # ===========================================================================
 
@@ -1689,8 +1759,9 @@ def _cmd_dpo(args: argparse.Namespace) -> None:
     )
 
     builder = DPOBuilder(
-        log_path   = args.log,
-        min_pairs  = args.min_pairs,
+        log_path       = args.log,
+        min_pairs      = args.min_pairs,
+        reflection_dir = getattr(args, "reflection_dir", None),
     )
 
     # Mostrar estadísticas del log

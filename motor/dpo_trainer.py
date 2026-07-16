@@ -67,10 +67,16 @@ class DPOBuilder:
         log_path: str | Path,
         min_pairs: int = 5,
         normalize_prompt: bool = True,
+        reflection_dir: Optional[str | Path] = None,
     ) -> None:
         self.log_path         = Path(log_path)
         self.min_pairs        = min_pairs
         self.normalize_prompt = normalize_prompt
+        # Directorio con la salida del pase de reflexión (feedback implícito):
+        # reflection_labels.jsonl (ratings inferidos) + reflection_pairs.jsonl
+        # (pares de corrección). Complementa al feedback humano explícito; el
+        # humano SIEMPRE tiene prioridad (ver _load_reflection).
+        self.reflection_dir   = Path(reflection_dir) if reflection_dir else None
         self._pairs: List[Dict[str, str]] = []
 
     # ------------------------------------------------------------------
@@ -104,6 +110,82 @@ class DPOBuilder:
         print(format_report(report))
         return rated
 
+    def _load_reflection(self, explicit_ids: set) -> Tuple[List[dict], List[Dict[str, str]]]:
+        """Carga la salida del pase de reflexión (feedback implícito).
+
+        Devuelve (label_entries, direct_pairs):
+          - label_entries: ratings inferidos unidos al log por `id`, con la
+            misma forma que las entradas explícitas (para entrar en la
+            agrupación por prompt). Se DESCARTAN los `id` que ya tienen
+            feedback humano explícito — el humano manda.
+          - direct_pairs: pares (prompt, chosen, rejected) de correcciones.
+        """
+        if not self.reflection_dir or not self.reflection_dir.exists():
+            return [], []
+
+        # Mapa id → entrada del log (para recuperar user_msg/assistant).
+        by_id: Dict[str, dict] = {}
+        try:
+            with open(self.log_path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        e = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if e.get("id"):
+                        by_id[e["id"]] = e
+        except FileNotFoundError:
+            return [], []
+
+        label_entries: List[dict] = []
+        labels_path = self.reflection_dir / "reflection_labels.jsonl"
+        if labels_path.exists():
+            with open(labels_path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        v = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    vid = v.get("id")
+                    if not vid or vid in explicit_ids:
+                        continue  # feedback humano tiene prioridad
+                    src = by_id.get(vid)
+                    if not src or not src.get("user_msg") or not src.get("assistant"):
+                        continue
+                    label_entries.append({
+                        "user_msg":  src["user_msg"],
+                        "assistant": src["assistant"],
+                        "feedback":  int(v.get("label", 0)),
+                        "id":        vid,
+                        "source":    "reflection",
+                    })
+
+        direct_pairs: List[Dict[str, str]] = []
+        pairs_path = self.reflection_dir / "reflection_pairs.jsonl"
+        if pairs_path.exists():
+            with open(pairs_path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        p = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if p.get("prompt") and p.get("chosen") and p.get("rejected"):
+                        direct_pairs.append({
+                            "prompt":   p["prompt"],
+                            "chosen":   p["chosen"],
+                            "rejected": p["rejected"],
+                        })
+        return label_entries, direct_pairs
+
     def build_pairs(self) -> List[Dict[str, str]]:
         """
         Construye pares (prompt, chosen, rejected) a partir del log.
@@ -114,6 +196,12 @@ class DPOBuilder:
         Devuelve la lista de pares y la guarda en self._pairs.
         """
         entries = self.load_entries()
+
+        # Feedback implícito del pase de reflexión (si se configuró): etiquetas
+        # inferidas (entran en la agrupación) + pares de corrección directos.
+        explicit_ids = {e["id"] for e in entries if e.get("id")}
+        label_entries, direct_pairs = self._load_reflection(explicit_ids)
+        entries = entries + label_entries
 
         # Agrupar por prompt normalizado
         positives: Dict[str, List[str]] = defaultdict(list)
@@ -126,7 +214,7 @@ class DPOBuilder:
             assistant = entry.get("assistant", "")
             if entry["feedback"] == 1:
                 positives[key].append(assistant)
-            else:
+            elif entry["feedback"] == -1:
                 negatives[key].append(assistant)
 
         # Formar pares: chosen × rejected para cada prompt compartido
@@ -145,9 +233,16 @@ class DPOBuilder:
                         "rejected": rejected,
                     })
 
+        # Anexar los pares de corrección directos de la reflexión (ya vienen
+        # como chosen/rejected; no dependen de colisión por prompt).
+        for p in direct_pairs:
+            if p["chosen"] != p["rejected"]:
+                pairs.append(p)
+
         self._pairs = pairs
+        _refl = f" (+{len(label_entries)} etiquetas y {len(direct_pairs)} pares de reflexión)" if self.reflection_dir else ""
         print(
-            f"[DPO] {len(entries)} entradas con feedback → "
+            f"[DPO] {len(entries)} entradas con feedback{_refl} → "
             f"{len(positives)} prompts con 👍, "
             f"{len(negatives)} con 👎, "
             f"{len(pairs)} pares formados."
