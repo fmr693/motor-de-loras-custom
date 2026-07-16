@@ -3281,7 +3281,16 @@ learning_rate: 2e-4
                 ctx.setdefault("text", rec.get(text_field, ""))
                 ctx.setdefault("label", answer)
                 ctx.setdefault("image", img_str)
-                prompt = prompt_template.format_map(ctx)
+                try:
+                    prompt = prompt_template.format_map(ctx)
+                except (ValueError, IndexError) as exc:
+                    # La plantilla es constante → falla igual en toda fila.
+                    # Degradar con aviso claro en vez de un error críptico a media.
+                    raise ValueError(
+                        f"[vlm] prompt_template inválida ({exc}). Usa {{campo}} "
+                        f"para insertar campos del manifiesto y escapa las llaves "
+                        f"literales duplicándolas: {{{{ y }}}}."
+                    ) from exc
             else:
                 prompt = default_q
 
@@ -3710,10 +3719,23 @@ learning_rate: 2e-4
                 p for p in path.rglob("*")
                 if p.suffix.lower() in (".txt", ".md", ".markdown")
             )
+            _bin = sorted(
+                p.name for p in path.rglob("*")
+                if p.suffix.lower() in (".pdf", ".docx", ".html", ".htm")
+            )
         else:
             files = [path]
+            _bin = ([path.name] if path.suffix.lower() in
+                    (".pdf", ".docx", ".html", ".htm") else [])
         if not files:
-            print(f"[DataDigestor] Sin documentos .txt/.md en {path}")
+            if _bin:
+                muestra = ", ".join(_bin[:3]) + ("…" if len(_bin) > 3 else "")
+                print(f"[DataDigestor] Sin texto plano en {path}, pero hay "
+                      f"documentos binarios ({muestra}). Este modo es standalone "
+                      f"y solo lee .txt/.md: extrae su texto antes (p.ej. con "
+                      f"from_pdf/from_docx) y vuelve a pasarlo como .txt.")
+            else:
+                print(f"[DataDigestor] Sin documentos .txt/.md en {path}")
             return self
 
         # Resolver nivel efectivo (Opción A: degradar con aviso)
@@ -4840,7 +4862,13 @@ def _looks_like_dialogue(text: str) -> bool:
 def _categorize_for_router(f: Path) -> Optional[str]:
     """Clasifica un fichero en la categoría/modo que le corresponde.
     Devuelve el modo ("distill"/"knowledge"/"vlm"/"classify") o None si el
-    fichero no es digerible (se ignora, p.ej. .DS_Store)."""
+    fichero no es digerible por el router (se ignora, p.ej. .DS_Store).
+
+    Nota: los documentos BINARIOS (.pdf/.docx/.html) NO se enrutan a knowledge,
+    porque `from_document_knowledge` solo lee texto plano (.txt/.md) de forma
+    standalone. El router los trata aparte (ver detect_digest_mode) para no
+    prometer una salida que el modo no puede producir sin extraer texto antes.
+    """
     ext = f.suffix.lower()
     if ext in _ROUTER_IMG_EXTS:
         return "vlm"
@@ -4852,8 +4880,6 @@ def _categorize_for_router(f: Path) -> Optional[str]:
         except Exception:
             return "knowledge"
         return "distill" if _looks_like_dialogue(text) else "knowledge"
-    if ext in _ROUTER_DOC_EXTS:
-        return "knowledge"
     return None
 
 
@@ -4864,9 +4890,13 @@ def detect_digest_mode(path: Union[str, Path]) -> str:
 
     Devuelve: "distill" | "knowledge" | "vlm" | "classify".
       - .md/.txt con marcadores de diálogo (charla con IA)  → distill
-      - .md/.txt/.pdf/.docx/.html de prosa (documento)       → knowledge
+      - .md/.txt de prosa (documento)                        → knowledge
       - imágenes                                             → vlm
       - tabular (.csv/.json/.jsonl/.xlsx)                    → classify
+
+    Los documentos BINARIOS (.pdf/.docx/.html) no se enrutan: el modo knowledge
+    solo lee texto plano standalone. Si son lo único presente, se lanza un error
+    accionable pidiendo extraer su texto antes (no una salida vacía silenciosa).
 
     NO adivina ante entradas ambiguas: si una carpeta mezcla categorías
     (p.ej. charlas + documentos, o texto + imágenes) lanza ValueError con un
@@ -4885,16 +4915,28 @@ def detect_digest_mode(path: Union[str, Path]) -> str:
 
     # Categorizar; agrupar rutas por modo para dar un aviso útil si hay mezcla.
     by_mode: Dict[str, List[str]] = {}
+    binary_docs: List[str] = []
     for f in files:
+        if f.suffix.lower() in _ROUTER_DOC_EXTS:
+            binary_docs.append(f.name)
+            continue
         cat = _categorize_for_router(f)
         if cat is None:
             continue
         by_mode.setdefault(cat, []).append(f.name)
 
     if not by_mode:
+        if binary_docs:
+            muestra = ", ".join(binary_docs[:3]) + ("…" if len(binary_docs) > 3 else "")
+            raise ValueError(
+                f"En '{path}' solo hay documentos binarios (PDF/DOCX/HTML: "
+                f"{muestra}) que --mode auto no digiere directamente. Extrae su "
+                f"texto a .txt/.md antes (el modo knowledge es standalone y solo "
+                f"lee texto plano)."
+            )
         raise ValueError(
             f"En '{path}' no se reconoció ningún fichero digerible "
-            f"(.md/.txt/.pdf/.docx/imágenes/.csv/.json)."
+            f"(.md/.txt/imágenes/.csv/.json)."
         )
     if len(by_mode) > 1:
         detalle = "; ".join(

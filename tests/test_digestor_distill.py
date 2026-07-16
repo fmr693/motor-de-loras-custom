@@ -406,6 +406,21 @@ class TestRouterDetectMode:
         (tmp_path / ".DS_Store").write_bytes(b"\x00\x01")
         assert _dig.detect_digest_mode(tmp_path) == "distill"
 
+    def test_solo_pdf_da_error_accionable(self, tmp_path):
+        # binarios (PDF/DOCX) NO se enrutan a knowledge (no los lee standalone):
+        # en vez de una salida vacía silenciosa, error claro pidiendo extraer texto
+        (tmp_path / "informe.pdf").write_bytes(b"%PDF-1.4 fake")
+        (tmp_path / "notas.docx").write_bytes(b"PK fake")
+        with pytest.raises(ValueError) as exc:
+            _dig.detect_digest_mode(tmp_path)
+        assert "binario" in str(exc.value).lower() or "pdf" in str(exc.value).lower()
+
+    def test_pdf_suelto_junto_a_charlas_se_ignora(self, tmp_path):
+        # un PDF perdido entre charlas no rompe: se ignora, gana distill
+        (tmp_path / "chat.md").write_text(_DIALOGO, encoding="utf-8")
+        (tmp_path / "extra.pdf").write_bytes(b"%PDF-1.4 fake")
+        assert _dig.detect_digest_mode(tmp_path) == "distill"
+
 
 class TestCLIAuto:
     def test_auto_distill_e2e(self, tmp_path):
@@ -552,6 +567,22 @@ class TestVLMManifest:
         d = DataDigestor(mode="vlm", auto_enrich=False)
         with pytest.raises(ValueError):
             d.from_vlm_manifest(m, output="inventado")
+
+    def test_plantilla_llave_desbalanceada_avisa(self, tmp_path):
+        # una llave sin cerrar en la plantilla degrada con aviso claro,
+        # no con un error críptico de format a media ejecución
+        m = _mk_vlm(tmp_path, _VLM_RECS)
+        d = DataDigestor(mode="vlm", auto_enrich=False)
+        with pytest.raises(ValueError) as exc:
+            d.from_vlm_manifest(m, prompt_template="coste 100{ euros")
+        assert "prompt_template" in str(exc.value)
+
+    def test_llaves_escapadas_literales(self, tmp_path):
+        # {{ y }} → llaves literales, sin tratarse como campo
+        m = _mk_vlm(tmp_path, [_VLM_RECS[0]])
+        d = DataDigestor(mode="vlm", auto_enrich=False)
+        d.from_vlm_manifest(m, prompt_template="usa {{json}} y {text}")
+        assert d.get_examples()[0]["messages"][0]["content"][1]["text"] == "usa {json} y hola"
 
 
 class TestCLIVLM:
