@@ -348,3 +348,86 @@ class TestCLIModos:
                   "--chunk-chars", "25", "--data", str(doc), "--output", str(out)])
         rows = _rows(out)
         assert rows and all("text" in r for r in rows)   # continued-pretraining
+
+
+# ---------------------------------------------------------------------------
+# F5 — Router de modo (detect_digest_mode) + CLI --mode auto
+# ---------------------------------------------------------------------------
+
+_DIALOGO = "## Human\n¿Qué es X?\n## Assistant\nX es algo concreto y útil."
+_DOCUMENTO = "# Título\nEsto es prosa expositiva sobre un dominio, sin diálogo."
+
+
+class TestRouterDetectMode:
+    def test_carpeta_de_charlas_es_distill(self, tmp_path):
+        (tmp_path / "a.md").write_text(_DIALOGO, encoding="utf-8")
+        (tmp_path / "b.md").write_text(_DIALOGO, encoding="utf-8")
+        assert _dig.detect_digest_mode(tmp_path) == "distill"
+
+    def test_documento_es_knowledge(self, tmp_path):
+        (tmp_path / "manual.md").write_text(_DOCUMENTO, encoding="utf-8")
+        assert _dig.detect_digest_mode(tmp_path) == "knowledge"
+
+    def test_tabular_es_classify(self, tmp_path):
+        (tmp_path / "datos.csv").write_text("text,label\nx,1\n", encoding="utf-8")
+        assert _dig.detect_digest_mode(tmp_path) == "classify"
+
+    def test_imagenes_es_vlm(self, tmp_path):
+        (tmp_path / "img1.png").write_bytes(b"\x89PNG\r\n")
+        (tmp_path / "img2.jpg").write_bytes(b"\xff\xd8\xff")
+        assert _dig.detect_digest_mode(tmp_path) == "vlm"
+
+    def test_archivo_unico_diálogo(self, tmp_path):
+        f = tmp_path / "chat.md"
+        f.write_text(_DIALOGO, encoding="utf-8")
+        assert _dig.detect_digest_mode(f) == "distill"
+
+    def test_mezcla_charla_y_documento_falla(self, tmp_path):
+        (tmp_path / "chat.md").write_text(_DIALOGO, encoding="utf-8")
+        (tmp_path / "doc.md").write_text(_DOCUMENTO, encoding="utf-8")
+        with pytest.raises(ValueError) as exc:
+            _dig.detect_digest_mode(tmp_path)
+        # el aviso menciona ambos modos en conflicto
+        assert "distill" in str(exc.value) and "knowledge" in str(exc.value)
+
+    def test_mezcla_texto_e_imagen_falla(self, tmp_path):
+        (tmp_path / "doc.md").write_text(_DOCUMENTO, encoding="utf-8")
+        (tmp_path / "img.png").write_bytes(b"\x89PNG\r\n")
+        with pytest.raises(ValueError):
+            _dig.detect_digest_mode(tmp_path)
+
+    def test_carpeta_vacia_falla(self, tmp_path):
+        with pytest.raises(ValueError):
+            _dig.detect_digest_mode(tmp_path)
+
+    def test_ficheros_irrelevantes_se_ignoran(self, tmp_path):
+        # un .DS_Store junto a charlas no rompe la detección
+        (tmp_path / "chat.md").write_text(_DIALOGO, encoding="utf-8")
+        (tmp_path / ".DS_Store").write_bytes(b"\x00\x01")
+        assert _dig.detect_digest_mode(tmp_path) == "distill"
+
+
+class TestCLIAuto:
+    def test_auto_distill_e2e(self, tmp_path):
+        (tmp_path / "chat.md").write_text(_DIALOGO, encoding="utf-8")
+        out = tmp_path / "out.jsonl"
+        _run_cli(["digestor", "--mode", "auto",
+                  "--data", str(tmp_path), "--output", str(out)])
+        rows = _rows(out)
+        assert rows and "messages" in rows[0]
+
+    def test_auto_knowledge_e2e(self, tmp_path):
+        (tmp_path / "manual.md").write_text(_DOCUMENTO, encoding="utf-8")
+        out = tmp_path / "out.jsonl"
+        _run_cli(["digestor", "--mode", "auto",
+                  "--data", str(tmp_path), "--output", str(out)])
+        rows = _rows(out)
+        assert rows and rows[0]["messages"][0]["role"] == "system"
+
+    def test_auto_mezclado_aborta(self, tmp_path):
+        (tmp_path / "chat.md").write_text(_DIALOGO, encoding="utf-8")
+        (tmp_path / "doc.md").write_text(_DOCUMENTO, encoding="utf-8")
+        out = tmp_path / "out.jsonl"
+        with pytest.raises(SystemExit):
+            _run_cli(["digestor", "--mode", "auto",
+                      "--data", str(tmp_path), "--output", str(out)])

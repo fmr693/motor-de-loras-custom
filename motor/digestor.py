@@ -4654,3 +4654,96 @@ def detect_file_type(path: Union[str, Path]) -> str:
         ".gif":   "image",
     }
     return _map.get(ext, "unknown")
+
+
+# ---------------------------------------------------------------------------
+# Router de modo (F5) — detecta el modo óptimo del Digestor para una entrada
+# ---------------------------------------------------------------------------
+
+_ROUTER_IMG_EXTS  = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".gif"}
+_ROUTER_TAB_EXTS  = {".csv", ".json", ".jsonl", ".xlsx", ".xls"}
+_ROUTER_TEXT_EXTS = {".md", ".markdown", ".txt"}
+_ROUTER_DOC_EXTS  = {".pdf", ".docx", ".html", ".htm"}
+
+
+def _looks_like_dialogue(text: str) -> bool:
+    """True si el texto parece una transcripción de charla (destilable a SFT).
+
+    Determinista: reusa el parser de diálogos y exige que haya AMBOS roles
+    (user y assistant) y al menos dos turnos. La prosa normal cae a knowledge.
+    """
+    turns = _parse_md_dialogue(text)
+    roles = {r for r, _ in turns}
+    return "user" in roles and "assistant" in roles and len(turns) >= 2
+
+
+def _categorize_for_router(f: Path) -> Optional[str]:
+    """Clasifica un fichero en la categoría/modo que le corresponde.
+    Devuelve el modo ("distill"/"knowledge"/"vlm"/"classify") o None si el
+    fichero no es digerible (se ignora, p.ej. .DS_Store)."""
+    ext = f.suffix.lower()
+    if ext in _ROUTER_IMG_EXTS:
+        return "vlm"
+    if ext in _ROUTER_TAB_EXTS:
+        return "classify"
+    if ext in _ROUTER_TEXT_EXTS:
+        try:
+            text = f.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return "knowledge"
+        return "distill" if _looks_like_dialogue(text) else "knowledge"
+    if ext in _ROUTER_DOC_EXTS:
+        return "knowledge"
+    return None
+
+
+def detect_digest_mode(path: Union[str, Path]) -> str:
+    """
+    Router del Digestor (F5): inspecciona una ruta (archivo o carpeta) y decide
+    el modo óptimo. Determinista y offline.
+
+    Devuelve: "distill" | "knowledge" | "vlm" | "classify".
+      - .md/.txt con marcadores de diálogo (charla con IA)  → distill
+      - .md/.txt/.pdf/.docx/.html de prosa (documento)       → knowledge
+      - imágenes                                             → vlm
+      - tabular (.csv/.json/.jsonl/.xlsx)                    → classify
+
+    NO adivina ante entradas ambiguas: si una carpeta mezcla categorías
+    (p.ej. charlas + documentos, o texto + imágenes) lanza ValueError con un
+    aviso claro pidiendo --mode explícito. Predecible sobre mágico
+    (calidad del dato: nunca produce una salida silenciosamente equivocada).
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"[detect_digest_mode] Ruta no encontrada: {path}")
+
+    files = [path] if path.is_file() else sorted(
+        p for p in path.rglob("*") if p.is_file()
+    )
+    if not files:
+        raise ValueError(f"'{path}' está vacía — nada que digerir.")
+
+    # Categorizar; agrupar rutas por modo para dar un aviso útil si hay mezcla.
+    by_mode: Dict[str, List[str]] = {}
+    for f in files:
+        cat = _categorize_for_router(f)
+        if cat is None:
+            continue
+        by_mode.setdefault(cat, []).append(f.name)
+
+    if not by_mode:
+        raise ValueError(
+            f"En '{path}' no se reconoció ningún fichero digerible "
+            f"(.md/.txt/.pdf/.docx/imágenes/.csv/.json)."
+        )
+    if len(by_mode) > 1:
+        detalle = "; ".join(
+            f"{m} ({len(v)}: {', '.join(v[:3])}{'…' if len(v) > 3 else ''})"
+            for m, v in sorted(by_mode.items())
+        )
+        raise ValueError(
+            f"'{path}' mezcla tipos que van a modos distintos → {detalle}. "
+            f"No adivino: relanza con --mode explícito "
+            f"({'|'.join(sorted(by_mode))})."
+        )
+    return next(iter(by_mode))

@@ -92,6 +92,16 @@ def _cmd_digestor(args: argparse.Namespace) -> None:
 
     mode = getattr(args, "mode", "classify")
 
+    # ── Router --mode auto: detecta el tipo de --data y elige el modo ──
+    if mode == "auto":
+        from motor.digestor import detect_digest_mode
+        try:
+            mode = detect_digest_mode(args.data)
+        except (ValueError, FileNotFoundError) as exc:
+            print(f"[ERROR] --mode auto no pudo enrutar: {exc}")
+            sys.exit(1)
+        print(f"[Digestor] --mode auto → modo detectado: '{mode}'.")
+
     # ── Modo distill: destilar charlas markdown → SFT ──────────────────
     if mode == "distill":
         digestor = DataDigestor(
@@ -125,10 +135,13 @@ def _cmd_digestor(args: argparse.Namespace) -> None:
         _digestor_export(digestor, args)
         return
 
-    # ── Modo classify (default, retrocompatible con EXIST) ─────────────
+    # ── Modo classify (default, retrocompatible con EXIST) o vlm ───────
+    # (una carpeta de solo imágenes se enruta a VLM aquí abajo; --task es la
+    #  pregunta del VLM en ese caso).
     if not args.task:
-        print("[ERROR] El modo 'classify' requiere --task (la instrucción de "
-              "clasificación).\n"
+        _q = ("la pregunta del VLM" if mode == "vlm"
+              else "la instrucción de clasificación")
+        print(f"[ERROR] El modo '{mode}' requiere --task ({_q}).\n"
               "        Para destilar charlas con IAs usa  --mode distill;\n"
               "        para digerir un documento en Q&A usa --mode knowledge.")
         sys.exit(1)
@@ -1318,11 +1331,13 @@ def _build_parser() -> argparse.ArgumentParser:
                             "ignorada en distill/knowledge (la respuesta es el dato).")
     p_dig.add_argument("--output",     required=True,  help="Ruta de salida del .jsonl")
     p_dig.add_argument("--mode",       default="classify",
-                       choices=["classify", "distill", "knowledge"],
+                       choices=["classify", "distill", "knowledge", "auto"],
                        help="Modo del Digestor. classify: datos etiquetados → clasificación "
                             "(default, retrocompatible EXIST). distill: .md de charlas con "
                             "IAs → SFT ChatML (determinista, offline, con higiene). "
-                            "knowledge: documento → Q&A (standalone; --level sube la calidad).")
+                            "knowledge: documento → Q&A (standalone; --level sube la calidad). "
+                            "auto: detecta el tipo de --data y elige el modo; ante tipos "
+                            "mezclados aborta pidiendo --mode explícito.")
     p_dig.add_argument("--label-col",  default=None,   help="Columna/campo de etiqueta")
     p_dig.add_argument("--label-map",  default=None,
                        help="Mapa de etiquetas: '0:NO,1:YES' o 'POSITIVE:POS,NEGATIVE:NEG'")
