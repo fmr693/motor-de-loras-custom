@@ -830,6 +830,74 @@ def _chunk_topic(chunk: str) -> str:
     return " ".join(words[:6]) if words else "el contenido"
 
 
+# --- Extracción de texto de documentos (para el modo knowledge) ------------
+# Cada formato binario usa una librería OPCIONAL. Si falta, el modo knowledge
+# degrada con aviso (no rompe): el texto plano (.txt/.md) es el suelo standalone.
+
+_KNOWLEDGE_TEXT_EXTS   = (".txt", ".md", ".markdown")
+_KNOWLEDGE_DOC_EXTS    = (".pdf", ".docx", ".html", ".htm")
+_KNOWLEDGE_ALL_EXTS    = _KNOWLEDGE_TEXT_EXTS + _KNOWLEDGE_DOC_EXTS
+_KNOWLEDGE_LIB_HINT    = {
+    ".pdf":  "pypdf (pip install pypdf)",
+    ".docx": "python-docx (pip install python-docx)",
+    ".html": "beautifulsoup4 + lxml (pip install beautifulsoup4 lxml)",
+    ".htm":  "beautifulsoup4 + lxml (pip install beautifulsoup4 lxml)",
+}
+
+
+def _pdf_to_text(path: Path) -> str:
+    from pypdf import PdfReader   # ImportError si falta la librería
+    reader = PdfReader(str(path))
+    return "\n\n".join((pg.extract_text() or "") for pg in reader.pages)
+
+
+def _docx_to_text(path: Path) -> str:
+    from docx import Document
+    return "\n\n".join(p.text for p in Document(str(path)).paragraphs)
+
+
+def _html_to_text(path: Path) -> str:
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(path.read_text(encoding="utf-8", errors="ignore"), "lxml")
+    for tag in soup(["script", "style", "meta", "noscript", "header", "footer", "nav"]):
+        tag.decompose()
+    return soup.get_text(" ")
+
+
+def _extract_document_text(path: Union[str, Path], encoding: str = "utf-8"):
+    """Extrae texto plano de un documento para el modo knowledge.
+
+    Devuelve (texto, hint_libreria):
+      - texto=None, hint=None  → no se pudo leer (formato/lectura), ya avisado.
+      - texto=None, hint="…"   → falta una librería opcional (degradar con aviso).
+      - texto=str,  hint=None  → OK.
+
+    .txt/.md/.markdown son 100% standalone (stdlib). .pdf/.docx/.html usan libs
+    OPCIONALES (pypdf/python-docx/bs4); si no están, se avisa y se omite.
+    """
+    p = Path(path)
+    ext = p.suffix.lower()
+    if ext in _KNOWLEDGE_TEXT_EXTS:
+        try:
+            return p.read_text(encoding=encoding), None
+        except Exception as exc:
+            print(f"  [!] No se pudo leer {p.name}: {exc}")
+            return None, None
+    try:
+        if ext == ".pdf":
+            return _pdf_to_text(p), None
+        if ext == ".docx":
+            return _docx_to_text(p), None
+        if ext in (".html", ".htm"):
+            return _html_to_text(p), None
+    except ImportError:
+        return None, _KNOWLEDGE_LIB_HINT.get(ext, ext)
+    except Exception as exc:
+        print(f"  [!] No se pudo extraer texto de {p.name}: {exc}")
+        return None, None
+    return None, None
+
+
 def _extract_json_obj(text: str) -> Optional[dict]:
     """Extrae el primer objeto JSON del texto del LLM (tolerante a fences)."""
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.MULTILINE).strip()
@@ -3699,13 +3767,17 @@ learning_rate: 2e-4
 
         STANDALONE: completion/template no tocan la red. "llm"/"auto" degradan a
         "template" con aviso claro si el endpoint no responde (Opción A: el
-        embudo nunca se atasca). Solo maneja .txt/.md (documentos de texto);
-        PDF/DOCX: extrae texto antes con from_pdf/from_docx o pásalos como .txt.
+        embudo nunca se atasca).
+
+        Formatos: .txt/.md son 100% standalone (stdlib). .pdf/.docx/.html se
+        extraen con librerías OPCIONALES (pypdf/python-docx/bs4); si no están
+        instaladas, esos documentos se OMITEN con un aviso claro (nunca rompe:
+        el texto plano siempre funciona).
 
         Parámetros
         ----------
         path : str | Path
-            Archivo .txt/.md/.markdown o carpeta (recursivo).
+            Archivo .txt/.md/.markdown/.pdf/.docx/.html o carpeta (recursivo).
         """
         path = Path(path)
         if not path.exists():
@@ -3717,25 +3789,13 @@ learning_rate: 2e-4
         if path.is_dir():
             files = sorted(
                 p for p in path.rglob("*")
-                if p.suffix.lower() in (".txt", ".md", ".markdown")
-            )
-            _bin = sorted(
-                p.name for p in path.rglob("*")
-                if p.suffix.lower() in (".pdf", ".docx", ".html", ".htm")
+                if p.suffix.lower() in _KNOWLEDGE_ALL_EXTS
             )
         else:
             files = [path]
-            _bin = ([path.name] if path.suffix.lower() in
-                    (".pdf", ".docx", ".html", ".htm") else [])
         if not files:
-            if _bin:
-                muestra = ", ".join(_bin[:3]) + ("…" if len(_bin) > 3 else "")
-                print(f"[DataDigestor] Sin texto plano en {path}, pero hay "
-                      f"documentos binarios ({muestra}). Este modo es standalone "
-                      f"y solo lee .txt/.md: extrae su texto antes (p.ej. con "
-                      f"from_pdf/from_docx) y vuelve a pasarlo como .txt.")
-            else:
-                print(f"[DataDigestor] Sin documentos .txt/.md en {path}")
+            print(f"[DataDigestor] Sin documentos digeribles en {path} "
+                  f"(.txt/.md/.pdf/.docx/.html).")
             return self
 
         # Resolver nivel efectivo (Opción A: degradar con aviso)
@@ -3757,12 +3817,17 @@ learning_rate: 2e-4
         print(f"[DataDigestor] Modo conocimiento — nivel efectivo: '{eff}'.")
 
         added = 0
+        processed = 0
+        skipped_lib: Dict[str, List[str]] = {}   # hint librería → [nombres]
         for f in files:
-            try:
-                text = _clean_text(f.read_text(encoding=encoding))
-            except Exception as exc:
-                print(f"  [!] No se pudo leer {f.name}: {exc}")
+            text, need = _extract_document_text(f, encoding=encoding)
+            if need:                               # falta librería opcional
+                skipped_lib.setdefault(need, []).append(f.name)
                 continue
+            if not text or not text.strip():
+                continue
+            processed += 1
+            text = _clean_text(text)
             for chunk in _chunk_text(text, chunk_chars):
                 if eff == "completion":
                     self._examples.append({"text": chunk})
@@ -3786,8 +3851,15 @@ learning_rate: 2e-4
                         self._examples.append(self._knowledge_chatml(q, a))
                         added += 1
 
+        # Aviso agregado por librerías de extracción ausentes (Opción A).
+        for hint, names in skipped_lib.items():
+            muestra = ", ".join(names[:3]) + ("…" if len(names) > 3 else "")
+            print(f"[DataDigestor] AVISO: {len(names)} documento(s) omitidos por "
+                  f"falta de {hint} ({muestra}). Instálala o extrae su texto a "
+                  f".txt. El texto plano (.txt/.md) no necesita nada.")
+
         print(f"[DataDigestor] Conocimiento: {added} ejemplos de "
-              f"{len(files)} documento(s).")
+              f"{processed} documento(s) procesado(s).")
         return self
 
     def _knowledge_chatml(self, question: str, answer: str) -> dict:
@@ -4864,10 +4936,8 @@ def _categorize_for_router(f: Path) -> Optional[str]:
     Devuelve el modo ("distill"/"knowledge"/"vlm"/"classify") o None si el
     fichero no es digerible por el router (se ignora, p.ej. .DS_Store).
 
-    Nota: los documentos BINARIOS (.pdf/.docx/.html) NO se enrutan a knowledge,
-    porque `from_document_knowledge` solo lee texto plano (.txt/.md) de forma
-    standalone. El router los trata aparte (ver detect_digest_mode) para no
-    prometer una salida que el modo no puede producir sin extraer texto antes.
+    Los documentos (.pdf/.docx/.html) van a knowledge: ese modo los extrae con
+    librerías opcionales y, si faltan, degrada con aviso (no salida vacía muda).
     """
     ext = f.suffix.lower()
     if ext in _ROUTER_IMG_EXTS:
@@ -4880,6 +4950,8 @@ def _categorize_for_router(f: Path) -> Optional[str]:
         except Exception:
             return "knowledge"
         return "distill" if _looks_like_dialogue(text) else "knowledge"
+    if ext in _ROUTER_DOC_EXTS:
+        return "knowledge"
     return None
 
 
@@ -4890,13 +4962,9 @@ def detect_digest_mode(path: Union[str, Path]) -> str:
 
     Devuelve: "distill" | "knowledge" | "vlm" | "classify".
       - .md/.txt con marcadores de diálogo (charla con IA)  → distill
-      - .md/.txt de prosa (documento)                        → knowledge
+      - .md/.txt de prosa + .pdf/.docx/.html (documento)     → knowledge
       - imágenes                                             → vlm
       - tabular (.csv/.json/.jsonl/.xlsx)                    → classify
-
-    Los documentos BINARIOS (.pdf/.docx/.html) no se enrutan: el modo knowledge
-    solo lee texto plano standalone. Si son lo único presente, se lanza un error
-    accionable pidiendo extraer su texto antes (no una salida vacía silenciosa).
 
     NO adivina ante entradas ambiguas: si una carpeta mezcla categorías
     (p.ej. charlas + documentos, o texto + imágenes) lanza ValueError con un
@@ -4915,28 +4983,16 @@ def detect_digest_mode(path: Union[str, Path]) -> str:
 
     # Categorizar; agrupar rutas por modo para dar un aviso útil si hay mezcla.
     by_mode: Dict[str, List[str]] = {}
-    binary_docs: List[str] = []
     for f in files:
-        if f.suffix.lower() in _ROUTER_DOC_EXTS:
-            binary_docs.append(f.name)
-            continue
         cat = _categorize_for_router(f)
         if cat is None:
             continue
         by_mode.setdefault(cat, []).append(f.name)
 
     if not by_mode:
-        if binary_docs:
-            muestra = ", ".join(binary_docs[:3]) + ("…" if len(binary_docs) > 3 else "")
-            raise ValueError(
-                f"En '{path}' solo hay documentos binarios (PDF/DOCX/HTML: "
-                f"{muestra}) que --mode auto no digiere directamente. Extrae su "
-                f"texto a .txt/.md antes (el modo knowledge es standalone y solo "
-                f"lee texto plano)."
-            )
         raise ValueError(
             f"En '{path}' no se reconoció ningún fichero digerible "
-            f"(.md/.txt/imágenes/.csv/.json)."
+            f"(.md/.txt/.pdf/.docx/imágenes/.csv/.json)."
         )
     if len(by_mode) > 1:
         detalle = "; ".join(

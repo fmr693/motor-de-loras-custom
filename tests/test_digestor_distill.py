@@ -265,6 +265,41 @@ class TestKnowledge:
         with pytest.raises(ValueError):
             d.from_document_knowledge(f, level="inventado")
 
+    def test_pdf_extrae_con_libreria(self, tmp_path, monkeypatch):
+        # con pypdf disponible (mockeado), el PDF se digiere como cualquier doc
+        monkeypatch.setattr(_dig, "_pdf_to_text",
+                            lambda p: "# Contrato\nRescisión con 30 días de aviso.")
+        pdf = tmp_path / "contrato.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+        d = DataDigestor(mode="knowledge", auto_enrich=False)
+        d.from_document_knowledge(pdf, level="template")
+        ex = d.get_examples()
+        assert ex and "30 días" in ex[0]["messages"][2]["content"]
+
+    def test_pdf_sin_libreria_degrada_con_aviso(self, tmp_path, monkeypatch, capsys):
+        # sin pypdf: se OMITE con aviso claro, nunca rompe (Opción A)
+        def _boom(p):
+            raise ImportError("No module named 'pypdf'")
+        monkeypatch.setattr(_dig, "_pdf_to_text", _boom)
+        pdf = tmp_path / "contrato.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake")
+        d = DataDigestor(mode="knowledge", auto_enrich=False)
+        d.from_document_knowledge(pdf, level="template")
+        assert d.get_examples() == []                 # no rompió, no produjo
+        out = capsys.readouterr().out
+        assert "pypdf" in out and "AVISO" in out       # avisó qué falta
+
+    def test_carpeta_mixta_md_ok_pdf_sin_lib(self, tmp_path, monkeypatch):
+        # .md real se procesa; el .pdf sin librería se omite (dataset no vacío)
+        monkeypatch.setattr(_dig, "_pdf_to_text",
+                            lambda p: (_ for _ in ()).throw(ImportError("x")))
+        (tmp_path / "notas.md").write_text("# Tema\nContenido de dominio real.",
+                                           encoding="utf-8")
+        (tmp_path / "extra.pdf").write_bytes(b"%PDF-1.4 fake")
+        d = DataDigestor(mode="knowledge", auto_enrich=False)
+        d.from_document_knowledge(tmp_path, level="template")
+        assert d.get_examples()                        # el .md sí produjo
+
 
 # ---------------------------------------------------------------------------
 # F5 — Exposición de distill/knowledge en el CLI (digestor --mode)
@@ -406,20 +441,19 @@ class TestRouterDetectMode:
         (tmp_path / ".DS_Store").write_bytes(b"\x00\x01")
         assert _dig.detect_digest_mode(tmp_path) == "distill"
 
-    def test_solo_pdf_da_error_accionable(self, tmp_path):
-        # binarios (PDF/DOCX) NO se enrutan a knowledge (no los lee standalone):
-        # en vez de una salida vacía silenciosa, error claro pidiendo extraer texto
+    def test_pdf_folder_es_knowledge(self, tmp_path):
+        # PDF/DOCX se enrutan a knowledge (que los extrae o degrada con aviso)
         (tmp_path / "informe.pdf").write_bytes(b"%PDF-1.4 fake")
         (tmp_path / "notas.docx").write_bytes(b"PK fake")
+        assert _dig.detect_digest_mode(tmp_path) == "knowledge"
+
+    def test_charla_mas_pdf_es_mezcla(self, tmp_path):
+        # charla (distill) + documento pdf (knowledge) → ambiguo → error claro
+        (tmp_path / "chat.md").write_text(_DIALOGO, encoding="utf-8")
+        (tmp_path / "doc.pdf").write_bytes(b"%PDF-1.4 fake")
         with pytest.raises(ValueError) as exc:
             _dig.detect_digest_mode(tmp_path)
-        assert "binario" in str(exc.value).lower() or "pdf" in str(exc.value).lower()
-
-    def test_pdf_suelto_junto_a_charlas_se_ignora(self, tmp_path):
-        # un PDF perdido entre charlas no rompe: se ignora, gana distill
-        (tmp_path / "chat.md").write_text(_DIALOGO, encoding="utf-8")
-        (tmp_path / "extra.pdf").write_bytes(b"%PDF-1.4 fake")
-        assert _dig.detect_digest_mode(tmp_path) == "distill"
+        assert "distill" in str(exc.value) and "knowledge" in str(exc.value)
 
 
 class TestCLIAuto:
