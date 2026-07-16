@@ -431,3 +431,158 @@ class TestCLIAuto:
         with pytest.raises(SystemExit):
             _run_cli(["digestor", "--mode", "auto",
                       "--data", str(tmp_path), "--output", str(out)])
+
+
+# ---------------------------------------------------------------------------
+# F4 — Modo VLM con manifiesto externo (labels + prompt por ejemplo + splits)
+# ---------------------------------------------------------------------------
+
+_VLM_RECS = [
+    {"id": "m1", "image": "m1.png", "label": 1, "text": "hola", "split": "train"},
+    {"id": "m2", "image": "m2.png", "label": 0, "text": "adios", "split": "val"},
+    {"id": "m3", "image": "missing3.png", "label": 1, "text": "x", "split": "train"},
+]
+
+
+def _mk_vlm(tmp_path, records, name="manifest.jsonl"):
+    """Crea las imágenes referenciadas (solo existencia) + el manifiesto jsonl."""
+    for r in records:
+        img = r.get("image", "")
+        if img and not img.startswith("missing"):
+            (tmp_path / img).write_bytes(b"\x89PNG\r\n")
+    m = tmp_path / name
+    m.write_text("\n".join(_json.dumps(r, ensure_ascii=False) for r in records),
+                 encoding="utf-8")
+    return m
+
+
+class TestManifestReader:
+    def test_jsonl(self, tmp_path):
+        m = _mk_vlm(tmp_path, _VLM_RECS)
+        recs = _dig._read_manifest_records(m)
+        assert len(recs) == 3 and recs[0]["id"] == "m1"
+
+    def test_json_dict_inyecta_id(self, tmp_path):
+        # .json como mapa id→registro (estilo EXIST): la clave se vuelve id
+        data = {"a": {"image": "a.png", "label": 1}, "b": {"image": "b.png", "label": 0}}
+        m = tmp_path / "man.json"
+        m.write_text(_json.dumps(data), encoding="utf-8")
+        recs = _dig._read_manifest_records(m)
+        assert {r["id"] for r in recs} == {"a", "b"}
+
+    def test_csv(self, tmp_path):
+        m = tmp_path / "man.csv"
+        m.write_text("id,image,label\nm1,m1.png,1\n", encoding="utf-8")
+        recs = _dig._read_manifest_records(m)
+        assert recs[0]["label"] == "1"        # csv → strings
+
+    def test_extension_no_soportada_falla(self, tmp_path):
+        m = tmp_path / "man.txt"
+        m.write_text("x", encoding="utf-8")
+        with pytest.raises(ValueError):
+            _dig._read_manifest_records(m)
+
+
+class TestVLMManifest:
+    def test_chatml_label_map_prompt_e_higiene(self, tmp_path):
+        m = _mk_vlm(tmp_path, _VLM_RECS)
+        d = DataDigestor(mode="vlm", label_map={1: "YES", 0: "NO"}, auto_enrich=False)
+        d.from_vlm_manifest(m, prompt_template="T:{text}")
+        ex = d.get_examples()
+        assert len(ex) == 2                    # m3 (imagen ausente) descartado
+        user = ex[0]["messages"][0]["content"]
+        assert user[0]["type"] == "image" and "m1.png" in user[0]["image"]
+        assert user[1]["text"] == "T:hola"     # (b) prompt por ejemplo
+        assert ex[0]["messages"][1]["content"] == "YES"   # (a) label_map aplicado
+
+    def test_prompt_field_override(self, tmp_path):
+        recs = [{"id": "m1", "image": "m1.png", "label": 1, "prompt": "CUSTOM"}]
+        m = _mk_vlm(tmp_path, recs)
+        d = DataDigestor(mode="vlm", auto_enrich=False)
+        d.from_vlm_manifest(m, prompt_template="ignorada:{text}")
+        assert d.get_examples()[0]["messages"][0]["content"][1]["text"] == "CUSTOM"
+
+    def test_prompt_fijo_por_defecto(self, tmp_path):
+        recs = [{"id": "m1", "image": "m1.png", "label": 1}]
+        m = _mk_vlm(tmp_path, recs)
+        d = DataDigestor(mode="vlm", auto_enrich=False)
+        d.from_vlm_manifest(m, question="¿Qué muestra?")
+        assert d.get_examples()[0]["messages"][0]["content"][1]["text"] == "¿Qué muestra?"
+
+    def test_split_por_campo(self, tmp_path):
+        m = _mk_vlm(tmp_path, _VLM_RECS)
+        d = DataDigestor(mode="vlm", auto_enrich=False)
+        d.from_vlm_manifest(m, split="train")   # train = m1, m3; m3 sin imagen
+        assert len(d.get_examples()) == 1
+
+    def test_split_por_fichero(self, tmp_path):
+        m = _mk_vlm(tmp_path, _VLM_RECS)
+        splits = tmp_path / "splits.json"
+        splits.write_text(_json.dumps({"train": ["m1"], "val": ["m2"]}), encoding="utf-8")
+        d = DataDigestor(mode="vlm", auto_enrich=False)
+        d.from_vlm_manifest(m, split="val", splits_file=splits)
+        ex = d.get_examples()
+        assert len(ex) == 1 and ex[0]["messages"][1]["content"] == "0"  # sin label_map
+
+    def test_split_inexistente_en_fichero_falla(self, tmp_path):
+        m = _mk_vlm(tmp_path, _VLM_RECS)
+        splits = tmp_path / "splits.json"
+        splits.write_text(_json.dumps({"train": ["m1"]}), encoding="utf-8")
+        d = DataDigestor(mode="vlm", auto_enrich=False)
+        with pytest.raises(ValueError):
+            d.from_vlm_manifest(m, split="holdout", splits_file=splits)
+
+    def test_output_meta(self, tmp_path):
+        m = _mk_vlm(tmp_path, _VLM_RECS)
+        d = DataDigestor(mode="vlm", label_map={1: "YES", 0: "NO"}, auto_enrich=False)
+        d.from_vlm_manifest(m, output="meta", prompt_template="T:{text}")
+        ex = d.get_examples()
+        assert len(ex) == 2
+        assert set(ex[0]) == {"id", "image", "prompt", "label"}
+        assert ex[0]["label"] == "YES" and ex[0]["prompt"] == "T:hola"
+
+    def test_require_images_false_mantiene(self, tmp_path):
+        m = _mk_vlm(tmp_path, _VLM_RECS)
+        d = DataDigestor(mode="vlm", auto_enrich=False)
+        d.from_vlm_manifest(m, require_images=False)
+        assert len(d.get_examples()) == 3      # m3 se mantiene (ruta sin resolver)
+
+    def test_output_invalido_falla(self, tmp_path):
+        m = _mk_vlm(tmp_path, _VLM_RECS)
+        d = DataDigestor(mode="vlm", auto_enrich=False)
+        with pytest.raises(ValueError):
+            d.from_vlm_manifest(m, output="inventado")
+
+
+class TestCLIVLM:
+    def _mk(self, tmp_path):
+        recs = [
+            {"id": "m1", "image": "m1.png", "label": 1, "text": "a", "split": "train"},
+            {"id": "m2", "image": "m2.png", "label": 0, "text": "b", "split": "holdout"},
+        ]
+        return _mk_vlm(tmp_path, recs)
+
+    def test_cli_vlm_chatml_train(self, tmp_path):
+        m = self._mk(tmp_path)
+        out = tmp_path / "train.jsonl"
+        # el \n literal de la plantilla debe volverse un salto real en el CLI
+        _run_cli(["digestor", "--mode", "vlm", "--manifest", str(m),
+                  "--label-col", "label", "--label-map", "1:YES,0:NO",
+                  "--prompt-template", "T:{text}\\nQ", "--split", "train",
+                  "--output", str(out)])
+        rows = _rows(out)
+        assert len(rows) == 1
+        assert rows[0]["messages"][1]["content"] == "YES"
+        assert rows[0]["messages"][0]["content"][1]["text"] == "T:a\nQ"
+
+    def test_cli_vlm_meta_holdout(self, tmp_path):
+        m = self._mk(tmp_path)
+        out = tmp_path / "holdout.meta.jsonl"
+        _run_cli(["digestor", "--mode", "vlm", "--manifest", str(m),
+                  "--label-col", "label", "--label-map", "1:YES,0:NO",
+                  "--vlm-output", "meta", "--split", "holdout",
+                  "--output", str(out)])
+        rows = _rows(out)
+        assert len(rows) == 1
+        assert set(rows[0]) == {"id", "image", "prompt", "label"}
+        assert rows[0]["label"] == "NO" and rows[0]["id"] == "m2"

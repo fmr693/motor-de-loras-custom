@@ -22,6 +22,12 @@ Uso como CLI:
     python fabrica_loras.py digestor --mode knowledge \
         --data manual.md --level template --output qa.jsonl
 
+    # Dataset VLM desde manifiesto (etiquetas + prompt por ejemplo + splits):
+    python fabrica_loras.py digestor --mode vlm --manifest memes.jsonl \
+        --label-col label --label-map "1:YES,0:NO" \
+        --prompt-template "Texto: «{text}»\n¿Es sexista? YES o NO." \
+        --split train --output t21_train.jsonl
+
 Estado de implementación
 -------------------------
   Fase 2 — DataDigestor     ✅ completado (9 formatos + semáforo)
@@ -38,6 +44,7 @@ from __future__ import annotations
 import argparse
 import sys
 import os
+from typing import Optional
 
 # Forzar UTF-8 en Windows para todas las operaciones de archivo.
 # Necesario porque trl lee plantillas Jinja sin especificar encoding
@@ -76,6 +83,29 @@ except Exception:
 # SECCIÓN 1: COMANDO — digestor
 # ===========================================================================
 
+def _parse_label_map(spec: Optional[str]) -> dict:
+    """Parsea '0:NO,1:YES' → {0: 'NO', 1: 'YES'} (claves int/float si procede)."""
+    label_map: dict = {}
+    if not spec:
+        return label_map
+    for pair in spec.split(","):
+        pair = pair.strip()
+        if ":" not in pair:
+            print(f"[WARN] Par inválido en label-map (ignorado): {pair!r}")
+            continue
+        k, v = pair.split(":", 1)
+        k, v = k.strip(), v.strip()
+        try:
+            k = int(k)
+        except ValueError:
+            try:
+                k = float(k)
+            except ValueError:
+                pass
+        label_map[k] = v
+    return label_map
+
+
 def _cmd_digestor(args: argparse.Namespace) -> None:
     """
     Convierte datos crudos en dataset.jsonl usando DataDigestor.
@@ -91,6 +121,12 @@ def _cmd_digestor(args: argparse.Namespace) -> None:
     from motor.digestor import DataDigestor, detect_file_type
 
     mode = getattr(args, "mode", "classify")
+
+    # --data es obligatoria salvo en el modo vlm alimentado por --manifest.
+    _vlm_manifest = (mode == "vlm" and getattr(args, "manifest", None))
+    if not args.data and not _vlm_manifest:
+        print("[ERROR] Falta --data (ruta al archivo o carpeta de datos).")
+        sys.exit(1)
 
     # ── Router --mode auto: detecta el tipo de --data y elige el modo ──
     if mode == "auto":
@@ -135,6 +171,45 @@ def _cmd_digestor(args: argparse.Namespace) -> None:
         _digestor_export(digestor, args)
         return
 
+    # ── Modo vlm con MANIFIESTO externo (F4) ───────────────────────────
+    # (sin --manifest, vlm cae al bloque de abajo: carpeta de imágenes con
+    #  etiquetas por subcarpeta, el comportamiento retrocompatible.)
+    if mode == "vlm" and getattr(args, "manifest", None):
+        digestor = DataDigestor(
+            task=args.task,
+            label_col=args.label_col,
+            label_map=_parse_label_map(args.label_map) or None,
+            output_format=args.format,
+            model_id=getattr(args, "model", None),
+            mode="vlm",
+        )
+        vlm_out = getattr(args, "vlm_output", "chatml")
+        # En el CLI, \n y \t de la plantilla se interpretan como saltos reales
+        # (comodidad de shell; la API Python recibe la cadena tal cual).
+        _tpl = getattr(args, "prompt_template", None)
+        if _tpl:
+            _tpl = _tpl.replace("\\n", "\n").replace("\\t", "\t")
+        digestor.from_vlm_manifest(
+            args.manifest,
+            answer_field=args.label_col,
+            question=args.task,
+            prompt_template=_tpl,
+            image_root=getattr(args, "image_root", None),
+            image_field=getattr(args, "image_field", "image"),
+            split=getattr(args, "split", None),
+            splits_file=getattr(args, "splits_file", None),
+            output=vlm_out,
+        )
+        # La salida meta (id/image/prompt/label) es para EVALUAR: no se baraja
+        # (traza estable), no se deduplica y no aplica el semáforo de training.
+        if vlm_out == "meta":
+            n = digestor.to_jsonl(args.output, shuffle=False,
+                                  deduplicate=False, validate=False)
+            print(f"\n✓ {n} ejemplos (meta) exportados a {args.output}")
+        else:
+            _digestor_export(digestor, args)
+        return
+
     # ── Modo classify (default, retrocompatible con EXIST) o vlm ───────
     # (una carpeta de solo imágenes se enruta a VLM aquí abajo; --task es la
     #  pregunta del VLM en ese caso).
@@ -147,25 +222,7 @@ def _cmd_digestor(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     # --- Parsear label_map ("0:NO,1:YES" → {0: "NO", 1: "YES"}) ---
-    label_map = {}
-    if args.label_map:
-        for pair in args.label_map.split(","):
-            pair = pair.strip()
-            if ":" not in pair:
-                print(f"[WARN] Par inválido en label-map (ignorado): {pair!r}")
-                continue
-            k, v = pair.split(":", 1)
-            k = k.strip()
-            v = v.strip()
-            # Intentar convertir clave a int/float
-            try:
-                k = int(k)
-            except ValueError:
-                try:
-                    k = float(k)
-                except ValueError:
-                    pass
-            label_map[k] = v
+    label_map = _parse_label_map(args.label_map)
 
     digestor = DataDigestor(
         task=args.task,
@@ -1325,17 +1382,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "digestor",
         help="Convierte datos crudos en dataset.jsonl para fine-tuning LoRA",
     )
-    p_dig.add_argument("--data",       required=True,  help="Ruta al archivo o carpeta de datos")
+    p_dig.add_argument("--data",       default=None,
+                       help="Ruta al archivo o carpeta de datos. Obligatoria salvo en "
+                            "--mode vlm con --manifest (ahí el manifiesto es la entrada).")
     p_dig.add_argument("--task",       default=None,
                        help="Instrucción de la tarea. OBLIGATORIA en --mode classify; "
                             "ignorada en distill/knowledge (la respuesta es el dato).")
     p_dig.add_argument("--output",     required=True,  help="Ruta de salida del .jsonl")
     p_dig.add_argument("--mode",       default="classify",
-                       choices=["classify", "distill", "knowledge", "auto"],
+                       choices=["classify", "distill", "knowledge", "vlm", "auto"],
                        help="Modo del Digestor. classify: datos etiquetados → clasificación "
                             "(default, retrocompatible EXIST). distill: .md de charlas con "
                             "IAs → SFT ChatML (determinista, offline, con higiene). "
                             "knowledge: documento → Q&A (standalone; --level sube la calidad). "
+                            "vlm: imágenes → dataset multimodal (con --manifest: etiquetas, "
+                            "prompt por ejemplo y splits externos). "
                             "auto: detecta el tipo de --data y elige el modo; ante tipos "
                             "mezclados aborta pidiendo --mode explícito.")
     p_dig.add_argument("--label-col",  default=None,   help="Columna/campo de etiqueta")
@@ -1391,6 +1452,30 @@ def _build_parser() -> argparse.ArgumentParser:
     p_dig.add_argument("--keep-refusals", action="store_true",
                        help="[distill] NO descartar turnos que son un rechazo. "
                             "Por defecto se descartan.")
+    # --- Flags de --mode vlm con manifiesto (F4) ---
+    p_dig.add_argument("--manifest", default=None,
+                       help="[vlm] Manifiesto externo (.jsonl/.json/.csv) imagen→etiqueta. "
+                            "Sin él, --mode vlm usa etiquetas por subcarpeta (retrocompat).")
+    p_dig.add_argument("--image-root", default=None,
+                       help="[vlm] Base para rutas de imagen relativas del manifiesto "
+                            "(default: la carpeta del manifiesto).")
+    p_dig.add_argument("--image-field", default="image",
+                       help="[vlm] Campo del manifiesto con la ruta de la imagen "
+                            "(default: 'image'). La etiqueta usa --label-col.")
+    p_dig.add_argument("--prompt-template", default=None,
+                       help="[vlm] Plantilla de prompt por ejemplo con placeholders del "
+                            "registro, p.ej. \"Texto: «{text}»\\n¿Es sexista? YES o NO.\". "
+                            "Un campo 'prompt' por fila la sobreescribe; sin plantilla se "
+                            "usa --task como pregunta fija.")
+    p_dig.add_argument("--split", default=None,
+                       help="[vlm] Emite solo las filas de este split (train/val/holdout), "
+                            "usando el campo 'split' del manifiesto o --splits-file.")
+    p_dig.add_argument("--splits-file", default=None,
+                       help="[vlm] JSON de splits {split: [ids]} para --split.")
+    p_dig.add_argument("--vlm-output", default="chatml", choices=["chatml", "meta"],
+                       help="[vlm] Formato de salida. chatml: para entrenar (image+prompt→"
+                            "respuesta). meta: id/image/prompt/label para EVALUAR sin fugar "
+                            "la respuesta (recomendado en val/holdout).")
     p_dig.set_defaults(func=_cmd_digestor)
 
     # --- Subcomando: trainer ---

@@ -1748,6 +1748,7 @@ class DataDigestor:
         shuffle: bool = True,
         seed: int = 42,
         deduplicate: bool = True,
+        validate: bool = True,
     ) -> int:
         """
         Exporta todos los ejemplos acumulados a un archivo .jsonl.
@@ -1764,6 +1765,10 @@ class DataDigestor:
             Semilla para la mezcla. Por defecto 42.
         deduplicate : bool
             Ejecutar deduplicación antes de exportar. Por defecto True.
+        validate : bool
+            Imprimir el semáforo de calidad tras exportar. Por defecto True.
+            Se desactiva para salidas meta de VLM (id/image/prompt/label), donde
+            el semáforo —pensado para datos de entrenamiento— no aplica.
 
         Devuelve
         --------
@@ -1793,7 +1798,8 @@ class DataDigestor:
                 f.write(json.dumps(ex, ensure_ascii=False) + "\n")
 
         print(f"[DataDigestor] Exportado: {len(examples)} ejemplos -> {output_path}")
-        self.validate(verbose=True)
+        if validate:
+            self.validate(verbose=True)
         return len(examples)
 
     def get_examples(self) -> List[dict]:
@@ -3150,6 +3156,160 @@ learning_rate: 2e-4
             added += 1
 
         print(f"[DataDigestor] VLM dataset: {added} ejemplos generados")
+        return self
+
+    def from_vlm_manifest(
+        self,
+        manifest: Union[str, Path],
+        *,
+        image_field: str = "image",
+        answer_field: Optional[str] = None,
+        text_field: str = "text",
+        prompt_field: str = "prompt",
+        id_field: str = "id",
+        split_field: str = "split",
+        question: Optional[str] = None,
+        prompt_template: Optional[str] = None,
+        image_root: Optional[Union[str, Path]] = None,
+        split: Optional[str] = None,
+        splits_file: Optional[Union[str, Path]] = None,
+        output: str = "chatml",
+        require_images: bool = True,
+    ) -> "DataDigestor":
+        """
+        Construye un dataset VLM desde un MANIFIESTO externo (modo vlm, F4).
+
+        Generaliza `from_images_folder_vlm` (que solo etiqueta por subcarpeta y
+        usa una pregunta fija) para el caso real de EXIST-VLM y similares:
+          (a) ETIQUETAS desde el manifiesto (JSON/CSV/JSONL: imagen → respuesta),
+              con `label_map` opcional (p.ej. 1→YES, 0→NO).
+          (b) PROMPT POR EJEMPLO: `prompt_template` con placeholders del registro
+              ({text}, {id}, {label}, {image}…) o un campo `prompt` por fila;
+              si no, la `question` fija (retrocompatible).
+          (c) SPLITS predefinidos: filtra por `split` usando un campo del registro
+              (`split_field`) o un fichero externo `splits_file` ({split:[ids]}).
+
+        Todo DETERMINISTA y STANDALONE (stdlib; sin LLM ni red). No redimensiona
+        imágenes (eso es preprocesado aparte); solo referencia sus rutas.
+
+        Salida (`output`):
+          - "chatml": ejemplo multimodal para entrenar (image+prompt → answer).
+          - "meta"  : {id, image, prompt, label} para EVALUAR (la respuesta gold
+                      va aparte, no se le enseña al modelo). Útil para val/holdout.
+
+        Higiene (calidad > cantidad): si `require_images`, descarta (contándolas)
+        las filas cuya imagen no existe en disco — nunca emite ejemplos rotos.
+
+        Parámetros clave
+        ----------------
+        manifest : str | Path
+            Manifiesto .jsonl/.json/.csv. Un .json que sea mapa id→registro
+            (estilo EXIST) también vale.
+        answer_field : str, opcional
+            Campo con la etiqueta/respuesta. Por defecto `label_col` o "label".
+        image_root : str | Path, opcional
+            Base para rutas de imagen relativas. Por defecto, la carpeta del
+            manifiesto.
+        split, splits_file : filtran a un subconjunto (train/val/holdout).
+        """
+        if output not in ("chatml", "meta"):
+            raise ValueError(f"output debe ser 'chatml' o 'meta', got: {output!r}")
+
+        records = _read_manifest_records(manifest, id_field=id_field)
+        if not records:
+            print(f"[DataDigestor] Manifiesto vacío: {manifest}")
+            return self
+
+        answer_key = answer_field or self.label_col or "label"
+        root = Path(image_root) if image_root else Path(manifest).resolve().parent
+        default_q = (question or self.task
+                     or "Describe detalladamente el contenido de esta imagen.")
+
+        splits_map = _load_splits_map(splits_file) if splits_file else None
+        if split and splits_map is not None and split not in splits_map:
+            raise ValueError(
+                f"[splits] '{split}' no está en el fichero de splits "
+                f"(disponibles: {sorted(splits_map)})."
+            )
+
+        added = skipped_split = skipped_missing = skipped_nolabel = 0
+
+        for rec in records:
+            rid = str(rec.get(id_field, "")) if id_field in rec else ""
+
+            # ── (c) Filtro de split ────────────────────────────────────
+            if split is not None:
+                if splits_map is not None:
+                    if rid not in splits_map[split]:
+                        skipped_split += 1
+                        continue
+                elif str(rec.get(split_field, "")) != split:
+                    skipped_split += 1
+                    continue
+
+            # ── Imagen (rutas relativas contra image_root) ─────────────
+            raw_img = str(rec.get(image_field, "")).strip()
+            if not raw_img:
+                skipped_missing += 1
+                continue
+            img_path = Path(raw_img)
+            if not img_path.is_absolute():
+                img_path = (root / img_path)
+            if require_images and not img_path.exists():
+                skipped_missing += 1
+                continue
+            img_str = str(img_path.resolve()) if img_path.exists() else str(img_path)
+
+            # ── (a) Respuesta / etiqueta (con label_map) ───────────────
+            raw_answer = rec.get(answer_key, None)
+            if raw_answer is None:
+                skipped_nolabel += 1
+                continue
+            answer = raw_answer
+            if self.label_map:
+                if raw_answer in self.label_map:
+                    answer = self.label_map[raw_answer]
+                elif str(raw_answer) in self.label_map:
+                    answer = self.label_map[str(raw_answer)]
+            answer = str(answer)
+
+            # ── (b) Prompt por ejemplo ─────────────────────────────────
+            if rec.get(prompt_field):
+                prompt = str(rec[prompt_field])
+            elif prompt_template:
+                ctx = _SafeFormatDict(rec)
+                ctx.setdefault("text", rec.get(text_field, ""))
+                ctx.setdefault("label", answer)
+                ctx.setdefault("image", img_str)
+                prompt = prompt_template.format_map(ctx)
+            else:
+                prompt = default_q
+
+            # ── Emitir en el formato pedido ────────────────────────────
+            if output == "meta":
+                self._examples.append({
+                    "id": rid, "image": img_str,
+                    "prompt": prompt, "label": answer,
+                })
+            else:
+                self._examples.append({"messages": [
+                    {"role": "user", "content": [
+                        {"type": "image", "image": img_str},
+                        {"type": "text",  "text": prompt},
+                    ]},
+                    {"role": "assistant", "content": answer},
+                ]})
+            added += 1
+
+        msg = (f"[DataDigestor] VLM manifiesto ({output}): {added} ejemplos"
+               + (f" [split={split}]" if split else "") + ".")
+        detalles = []
+        if skipped_split:   detalles.append(f"{skipped_split} fuera del split")
+        if skipped_missing: detalles.append(f"{skipped_missing} sin imagen válida")
+        if skipped_nolabel: detalles.append(f"{skipped_nolabel} sin etiqueta")
+        if detalles:
+            msg += "  Descartados: " + ", ".join(detalles) + "."
+        print(msg)
         return self
 
     def from_pdf_tables(
@@ -4747,3 +4907,77 @@ def detect_digest_mode(path: Union[str, Path]) -> str:
             f"({'|'.join(sorted(by_mode))})."
         )
     return next(iter(by_mode))
+
+
+# ---------------------------------------------------------------------------
+# Manifiesto VLM (F4) — lectura de manifiestos + formateo de prompt seguro
+# ---------------------------------------------------------------------------
+
+class _SafeFormatDict(dict):
+    """Dict para str.format_map: los placeholders ausentes se quedan en ''."""
+    def __missing__(self, key):  # noqa: D401
+        return ""
+
+
+def _read_manifest_records(
+    path: Union[str, Path], id_field: str = "id"
+) -> List[dict]:
+    """Lee un manifiesto (.jsonl / .json / .csv) → lista de dicts (registros).
+
+    Determinista y standalone (stdlib json/csv; sin pandas ni red).
+      - .jsonl        : un objeto JSON por línea.
+      - .json (lista) : array de objetos.
+      - .json (dict)  : mapa id→registro (estilo EXIST); la clave se inyecta
+                        en `id_field` si el registro no lo trae.
+      - .csv          : filas vía csv.DictReader (encabezado obligatorio).
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"[manifiesto] No encontrado: {path}")
+    ext = path.suffix.lower()
+
+    if ext == ".jsonl":
+        records = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+        return records
+
+    if ext == ".json":
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return list(data)
+        if isinstance(data, dict):
+            out = []
+            for k, v in data.items():
+                if isinstance(v, dict):
+                    rec = dict(v)
+                    rec.setdefault(id_field, k)
+                    out.append(rec)
+                else:
+                    out.append({id_field: k, "value": v})
+            return out
+        raise ValueError(f"[manifiesto] JSON no soportado en {path.name} "
+                         "(se esperaba lista u objeto).")
+
+    if ext == ".csv":
+        import csv
+        with open(path, encoding="utf-8", newline="") as fh:
+            return list(csv.DictReader(fh))
+
+    raise ValueError(f"[manifiesto] Extensión no soportada: {ext} "
+                     "(usa .jsonl, .json o .csv).")
+
+
+def _load_splits_map(
+    splits_file: Union[str, Path]
+) -> Dict[str, set]:
+    """Carga un fichero de splits {split: [ids]} → {split: set(str(id))}."""
+    path = Path(splits_file)
+    if not path.exists():
+        raise FileNotFoundError(f"[splits] No encontrado: {path}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("[splits] Se esperaba un objeto {split: [ids...]}.")
+    return {k: {str(x) for x in v} for k, v in data.items()}

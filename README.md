@@ -5,7 +5,7 @@
 > sobre cualquier modelo open-source, y lo sirve de principio a fin. **Sin nube. 0 €/consulta. 100% privado.**
 
 **Origen:** pipeline EXIST 2025 (detección de sexismo en memes) generalizado a una fábrica reutilizable.
-**Estado:** 582 tests · 0 fallos · 15 comandos CLI · Docker (CPU y GPU) · modelo base actual **Gemma 4 12B** a ~50 tok/s en RTX 4080 · contexto configurable hasta 64K (caché KV cuantizable) · RAG verificado · aprendizaje híbrido (feedback humano + reflexión) · Digestor multi-modo (clasificar/destilar/conocimiento) con router `--mode auto` en el CLI · compatible con frontends agénticos (Odysseus y Hermes).
+**Estado:** 597 tests · 0 fallos · 15 comandos CLI · Docker (CPU y GPU) · modelo base actual **Gemma 4 12B** a ~50 tok/s en RTX 4080 · contexto configurable hasta 64K (caché KV cuantizable) · RAG verificado · aprendizaje híbrido (feedback humano + reflexión) · Digestor multi-modo (clasificar/destilar/conocimiento/VLM) con router `--mode auto` en el CLI · compatible con frontends agénticos (Odysseus y Hermes).
 
 ---
 
@@ -35,7 +35,7 @@ El Motor funciona con cualquier modelo de HuggingFace (Qwen, Llama, Mistral, Phi
 
 | Módulo | Función |
 |---|---|
-| `digestor.py` | DataDigestor: 18 formatos → JSONL. Modos: `classify` (etiquetas), `distill` (charlas con IAs → SFT, con higiene), `knowledge` (documento → Q&A, standalone o con LLM opcional). Semáforo de 5 checks. |
+| `digestor.py` | DataDigestor: 18 formatos → JSONL. Modos: `classify` (etiquetas), `distill` (charlas con IAs → SFT, con higiene), `knowledge` (documento → Q&A, standalone o con LLM opcional), `vlm` (imágenes → multimodal desde manifiesto: etiquetas, prompt por ejemplo y splits). Semáforo de 5 checks. |
 | `analyzer.py` | ModelAnalyzer: detecta arquitectura, elige `target_modules` y configuración. |
 | `trainer_llm.py` | LLMTrainer: LoRA (PEFT+TRL) sobre cualquier modelo. Soporta `gemma4_unified`. |
 | `trainer_vlm.py` | VLMTrainer: igual para modelos visión-lenguaje. |
@@ -65,6 +65,8 @@ fabrica_loras digestor   --data datos.csv --task "..." --output dataset.jsonl   
 fabrica_loras digestor   --mode distill   --data ./charlas/ --output sft.jsonl          # charlas IA → SFT
 fabrica_loras digestor   --mode knowledge --data manual.md --level template --output qa.jsonl  # doc → Q&A
 fabrica_loras digestor   --mode auto      --data ./entrada/ --output ds.jsonl        # detecta tipo → modo
+fabrica_loras digestor   --mode vlm --manifest memes.jsonl --label-map "1:YES,0:NO" \
+                         --prompt-template "Texto: «{text}»\n¿Sexista? YES/NO." --split train --output train.jsonl  # VLM
 fabrica_loras analyzer   --model google/gemma-4-12B-it
 fabrica_loras train      --model google/... --data dataset.jsonl --output adapters/mi_adapter/
 fabrica_loras vlm        --model Qwen/Qwen2-VL-2B --data ... --output ...
@@ -137,7 +139,7 @@ El servidor expone una API estilo OpenAI, así que **cualquier frontend compatib
 
 ## Tests
 
-582 tests · 0 fallos · tres capas (unitaria, integración E2E, comportamiento).
+597 tests · 0 fallos · tres capas (unitaria, integración E2E, comportamiento).
 
 ```bash
 PYTHONUTF8=1 python -m pytest tests/ -q       # suite completa
