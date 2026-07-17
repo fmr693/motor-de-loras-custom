@@ -796,6 +796,17 @@ class TestImageErrors:
         assert ei.value.status_code == 400
         assert ei.value.detail["type"] == "invalid_image"
 
+    def test_texto_mal_codificado_da_400(self):
+        # un surrogate suelto en el content revienta el encode utf-8 de llama-cpp;
+        # es entrada malformada del cliente → 400, no 500 (verificado en vivo).
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as ei:
+            server._raise_inference_error(
+                ValueError("'utf-8' codec can't encode character in position 5: "
+                           "surrogates not allowed"))
+        assert ei.value.status_code == 400
+        assert ei.value.detail["type"] == "invalid_encoding"
+
     def test_error_generico_sigue_500(self):
         from fastapi import HTTPException
         with pytest.raises(HTTPException) as ei:

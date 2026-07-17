@@ -3788,6 +3788,12 @@ learning_rate: 2e-4
         if level not in ("completion", "template", "llm", "auto"):
             raise ValueError("level debe ser completion|template|llm|auto, "
                              f"got: {level!r}")
+        # chunk_chars < 1 rompía _chunk_text (range con paso 0/negativo).
+        # Degradar con aviso al default en vez de reventar con un traceback.
+        if chunk_chars < 1:
+            print(f"[DataDigestor] AVISO: chunk_chars={chunk_chars} inválido "
+                  f"(<1) → usando 1200.")
+            chunk_chars = 1200
 
         if path.is_dir():
             files = sorted(
@@ -5076,7 +5082,10 @@ def _read_manifest_records(
 
     if ext == ".csv":
         import csv
-        with open(path, encoding="utf-8", newline="") as fh:
+        # utf-8-sig quita el BOM que Excel antepone: sin esto, la 1ª columna
+        # queda como '﻿id' y NINGÚN campo (id/image/label) casaría →
+        # descarte silencioso de todo el manifiesto (verificado 17-jul).
+        with open(path, encoding="utf-8-sig", newline="") as fh:
             return list(csv.DictReader(fh))
 
     raise ValueError(f"[manifiesto] Extensión no soportada: {ext} "

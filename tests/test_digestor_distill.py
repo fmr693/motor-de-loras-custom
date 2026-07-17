@@ -265,6 +265,14 @@ class TestKnowledge:
         with pytest.raises(ValueError):
             d.from_document_knowledge(f, level="inventado")
 
+    def test_chunk_chars_invalido_degrada_sin_crash(self, tmp_path):
+        # chunk_chars<1 rompía _chunk_text (range con paso 0); ahora degrada al
+        # default con aviso en vez de reventar con un traceback (ronda 3).
+        f = self._doc(tmp_path, "Un texto de dominio con varias frases distintas.")
+        d = DataDigestor(mode="knowledge", auto_enrich=False)
+        d.from_document_knowledge(f, level="template", chunk_chars=0)   # no lanza
+        assert d.get_examples()
+
     def test_pdf_extrae_con_libreria(self, tmp_path, monkeypatch):
         # con pypdf disponible (mockeado), el PDF se digiere como cualquier doc
         monkeypatch.setattr(_dig, "_pdf_to_text",
@@ -545,6 +553,16 @@ class TestManifestReader:
         m.write_text("x", encoding="utf-8")
         with pytest.raises(ValueError):
             _dig._read_manifest_records(m)
+
+    def test_csv_con_bom_no_ensucia_las_claves(self, tmp_path):
+        # Excel exporta CSV con BOM; sin utf-8-sig la 1a clave sería '﻿id'
+        # y ningún campo (id/image/label) casaría → descarte silencioso de todo
+        # el manifiesto (verificado en la ronda 3 de estrés).
+        m = tmp_path / "bom.csv"
+        m.write_text("id,image,label\nm1,a.png,1\n", encoding="utf-8-sig")
+        recs = _dig._read_manifest_records(m)
+        assert list(recs[0].keys())[0] == "id"      # sin prefijo BOM
+        assert recs[0]["image"] == "a.png"
 
 
 class TestVLMManifest:

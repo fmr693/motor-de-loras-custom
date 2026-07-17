@@ -784,6 +784,23 @@ def _is_image_error(exc: Exception) -> bool:
     return any(m in msg for m in _IMAGE_ERROR_MARKERS)
 
 
+# Texto con codificación inválida (p.ej. surrogate suelto en el content). Es
+# entrada malformada del cliente → 400, no un 500 del servidor. Verificado en
+# vivo (17-jul): un \ud83d suelto reventaba el encode a utf-8 con un 500 opaco.
+_ENCODING_ERROR_MARKERS = (
+    "codec can't encode",
+    "codec can't decode",
+    "surrogates not allowed",
+    "surrogates_not_allowed",
+)
+
+
+def _is_encoding_error(exc: Exception) -> bool:
+    """True si la excepción es un problema de codificación del texto de entrada."""
+    msg = str(exc).lower()
+    return any(m in msg for m in _ENCODING_ERROR_MARKERS)
+
+
 def _raise_inference_error(exc: Exception, context: str = "Error en inferencia"):
     """Traduce una excepción de inferencia a HTTPException con el código
     adecuado. Desbordamiento de contexto e imagen inválida son culpa del
@@ -801,6 +818,13 @@ def _raise_inference_error(exc: Exception, context: str = "Error en inferencia")
                         f"Envía un data-URI base64 válido (data:image/...;base64,...) "
                         f"o una URL de imagen accesible."),
             "type": "invalid_image",
+        })
+    if _is_encoding_error(exc):
+        raise HTTPException(status_code=400, detail={
+            "message": (f"invalid_encoding: el texto tiene una codificación inválida "
+                        f"({exc}). Revisa surrogates sueltos o bytes mal formados en "
+                        f"el content."),
+            "type": "invalid_encoding",
         })
     raise HTTPException(status_code=500, detail=f"{context}: {exc}")
 
