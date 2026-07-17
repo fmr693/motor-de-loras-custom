@@ -91,6 +91,22 @@ class _ServerState:
 
 _state = _ServerState()
 
+# ---------------------------------------------------------------------------
+# Serialización de la inferencia
+# ---------------------------------------------------------------------------
+# llama-cpp-python NO es thread-safe: un único contexto compartido entre hilos
+# revienta el proceso. FastAPI despacha los endpoints `def` (síncronos) en un
+# threadpool, así que DOS peticiones simultáneas bastaban para tumbar el serve
+# con un segfault (medido 17-jul: 1 petición OK, 2 concurrentes → caída y
+# reinicio; ~105 s de recarga a 64k). Con Odysseus y Hermes apuntando al mismo
+# endpoint, coincidir era cuestión de tiempo.
+#
+# La GPU procesa una petición cada vez de todas formas, así que serializar no
+# cuesta rendimiento real: convierte un CRASH en una COLA. Es RLock por si algún
+# camino llegara a anidar llamadas. En streaming se mantiene tomado durante todo
+# el generador (si el cliente corta, GeneratorExit lo libera igual).
+_INFER_LOCK = threading.RLock()
+
 
 # ---------------------------------------------------------------------------
 # Carga del modelo (reutiliza lógica de _cmd_chat)
@@ -380,7 +396,8 @@ def _infer(
                 )
             except Exception:
                 pass  # gramática no disponible → inferencia sin restricción
-        result = _state.llama_model.create_chat_completion(**kw)
+        with _INFER_LOCK:      # llama-cpp no es thread-safe (ver _INFER_LOCK)
+            result = _state.llama_model.create_chat_completion(**kw)
         choice = result["choices"][0]
         content = _strip_gemma_channels(choice["message"]["content"] or "")
         if return_meta:
@@ -398,7 +415,7 @@ def _infer(
     )
     inputs = _state.tokenizer(text, return_tensors="pt").to(_state.model.device)
 
-    with torch.no_grad():
+    with torch.no_grad(), _INFER_LOCK:   # serializado igual que el camino GGUF
         output = _state.model.generate(
             **inputs,
             max_new_tokens     = max_tokens,
@@ -745,17 +762,46 @@ def _is_context_overflow(exc: Exception) -> bool:
     return any(m in msg for m in _CTX_OVERFLOW_MARKERS)
 
 
+# Marcadores de imagen inválida — el cliente mandó un data-URI/URL que no se
+# pudo decodificar. Verificados en vivo (17-jul): base64 corrupto, data-URI
+# truncado, bytes que no son imagen, URL desconocida/inalcanzable, image_url
+# malformado. Es culpa del cliente → 400, no un 500 opaco del servidor.
+_IMAGE_ERROR_MARKERS = (
+    "incorrect padding",
+    "invalid base64",
+    "failed to create bitmap",
+    "cannot identify image",
+    "unknown url type",
+    "urlopen error",
+    "connection refused",
+    "replace() argument 1 must be str",   # image_url dict sin 'url'
+)
+
+
+def _is_image_error(exc: Exception) -> bool:
+    """True si la excepción viene de un data-URI/URL de imagen inválido."""
+    msg = str(exc).lower()
+    return any(m in msg for m in _IMAGE_ERROR_MARKERS)
+
+
 def _raise_inference_error(exc: Exception, context: str = "Error en inferencia"):
     """Traduce una excepción de inferencia a HTTPException con el código
-    adecuado. El desbordamiento de contexto es culpa del prompt del cliente, no
-    del servidor → 400 `context_length_exceeded` en vez de un 500 opaco. El
-    resto de errores siguen siendo 500. Ver `_CTX_OVERFLOW_MARKERS`."""
+    adecuado. Desbordamiento de contexto e imagen inválida son culpa del
+    cliente → 400 (con un `type` accionable) en vez de un 500 opaco. El resto
+    siguen siendo 500. Ver `_CTX_OVERFLOW_MARKERS` / `_IMAGE_ERROR_MARKERS`."""
     from fastapi import HTTPException
     if _is_context_overflow(exc):
         raise HTTPException(status_code=400, detail=(
             f"context_length_exceeded: {exc}. El prompt supera el contexto del "
             f"modelo — reduce el historial/documentos, o sirve con MOTOR_N_CTX "
             f"mayor (ver motor/hardware.py)."))
+    if _is_image_error(exc):
+        raise HTTPException(status_code=400, detail={
+            "message": (f"invalid_image: no se pudo decodificar la imagen ({exc}). "
+                        f"Envía un data-URI base64 válido (data:image/...;base64,...) "
+                        f"o una URL de imagen accesible."),
+            "type": "invalid_image",
+        })
     raise HTTPException(status_code=500, detail=f"{context}: {exc}")
 
 
@@ -1729,7 +1775,8 @@ def create_app() -> "fastapi.FastAPI":
             )
             if req.tool_choice is not None:
                 kw["tool_choice"] = req.tool_choice
-            result = _state.llama_model.create_chat_completion(**kw)
+            with _INFER_LOCK:      # llama-cpp no es thread-safe
+                result = _state.llama_model.create_chat_completion(**kw)
             choice = result["choices"][0]
             msg = choice.get("message", {})
             tool_calls = msg.get("tool_calls") or None
@@ -1813,6 +1860,12 @@ def create_app() -> "fastapi.FastAPI":
                         }],
                     }) + "\n\n"
 
+                # El lock cubre TODO el generador: cada chunk avanza el modelo,
+                # así que soltarlo entre tokens dejaría entrar otra petición y
+                # petaría igual. `finally` lo libera aunque el cliente corte
+                # (GeneratorExit). Serializa el streaming con el resto: una
+                # respuesta en curso bloquea a las siguientes hasta terminar.
+                acquired = _INFER_LOCK.acquire()
                 try:
                     stream = _state.llama_model.create_chat_completion(
                         messages=messages,
@@ -1854,6 +1907,11 @@ def create_app() -> "fastapi.FastAPI":
                     err = {"error": str(e)}
                     yield f"data: {_json.dumps(err)}\n\n"
                 finally:
+                    # Liberar el lock de inferencia SIEMPRE (incl. GeneratorExit
+                    # si el cliente corta): si no, el serve quedaría bloqueado
+                    # para todos tras un streaming abortado.
+                    if acquired:
+                        _INFER_LOCK.release()
                     # Se ejecuta también si el cliente desconecta a mitad
                     # (GeneratorExit): logueamos lo acumulado hasta entonces.
                     if collected:

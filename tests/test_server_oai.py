@@ -771,3 +771,92 @@ class TestVisionEndpoint:
             assert client.get("/health").json()["vision"] is True
         finally:
             server._state.vision_ready = False
+
+
+# ---------------------------------------------------------------------------
+# 7. Robustez hallada en la prueba de estrés (17 jul): imagen inválida + concurrencia
+# ---------------------------------------------------------------------------
+
+class TestImageErrors:
+    """Una imagen mal formada es culpa del cliente → 400, no un 500 opaco.
+    Mensajes verificados en vivo contra el chat handler de llama-cpp."""
+
+    @pytest.mark.parametrize("msg", [
+        "Incorrect padding",
+        "Invalid base64-encoded string: number of data characters",
+        "Failed to create bitmap from image bytes",
+        "unknown url type: 'esto_no_es_una_url'",
+        "<urlopen error [Errno 111] Connection refused>",
+        "replace() argument 1 must be str, not dict",
+    ])
+    def test_imagen_invalida_da_400(self, msg):
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as ei:
+            server._raise_inference_error(ValueError(msg))
+        assert ei.value.status_code == 400
+        assert ei.value.detail["type"] == "invalid_image"
+
+    def test_error_generico_sigue_500(self):
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as ei:
+            server._raise_inference_error(RuntimeError("kernel panic"))
+        assert ei.value.status_code == 500
+
+
+class TestConcurrencySerialization:
+    """llama-cpp no es thread-safe: 2 peticiones simultáneas tumbaban el proceso
+    (medido en vivo). `_INFER_LOCK` debe serializar el acceso al modelo."""
+
+    def test_no_hay_solapamiento_bajo_carga(self, tmp_path):
+        import threading, time
+        st = server._state
+        saved = {k: getattr(st, k) for k in
+                 ("model", "llama_model", "is_gguf", "model_path", "api_key",
+                  "interaction_log_path", "sessions")}
+
+        overlap = {"max": 0, "cur": 0}
+        lock = threading.Lock()
+
+        class ReentrancyFake:
+            def create_chat_completion(self, messages, stream=False, **kw):
+                with lock:
+                    overlap["cur"] += 1
+                    overlap["max"] = max(overlap["max"], overlap["cur"])
+                time.sleep(0.05)                 # ventana para solaparse
+                with lock:
+                    overlap["cur"] -= 1
+                return {"choices": [{"message": {"role": "assistant",
+                        "content": "ok"}, "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1,
+                                  "total_tokens": 2}}
+
+        st.model = None
+        st.llama_model = ReentrancyFake()
+        st.is_gguf = True
+        st.model_path = "modelos/gemma-test.gguf"
+        st.api_key = None
+        st.interaction_log_path = str(tmp_path / "log.jsonl")
+        st.sessions = {}
+        try:
+            app = create_app()
+            client = TestClient(app)
+            errors = []
+
+            def hit():
+                try:
+                    r = client.post("/v1/chat/completions",
+                                    json={"messages": [{"role": "user", "content": "hola"}]})
+                    assert r.status_code == 200
+                except Exception as e:      # noqa
+                    errors.append(e)
+
+            ths = [threading.Thread(target=hit) for _ in range(8)]
+            for t in ths: t.start()
+            for t in ths: t.join()
+
+            assert not errors, f"peticiones fallaron: {errors[:2]}"
+            # LA clave: el modelo nunca se ejecutó en paralelo consigo mismo
+            assert overlap["max"] == 1, f"solapamiento detectado: {overlap['max']}"
+        finally:
+            for k, v in saved.items():
+                setattr(st, k, v)
