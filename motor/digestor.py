@@ -3329,8 +3329,11 @@ learning_rate: 2e-4
             img_str = str(img_path.resolve()) if img_path.exists() else str(img_path)
 
             # ── (a) Respuesta / etiqueta (con label_map) ───────────────
+            # La etiqueta debe ser un escalar. Un None o un tipo no escalar
+            # (lista/dict, típico de un manifiesto malformado) se descarta: ni
+            # crashea el lookup del label_map (unhashable) ni entra como basura.
             raw_answer = rec.get(answer_key, None)
-            if raw_answer is None:
+            if raw_answer is None or isinstance(raw_answer, (list, dict)):
                 skipped_nolabel += 1
                 continue
             answer = raw_answer
@@ -5035,11 +5038,23 @@ def _read_manifest_records(
     ext = path.suffix.lower()
 
     if ext == ".jsonl":
+        # Resiliente por línea: una fila corrupta NO tumba el manifiesto entero
+        # (calidad > cantidad — se salta con aviso, se procesa el resto).
         records = []
-        for line in path.read_text(encoding="utf-8").splitlines():
+        malas = 0
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            try:
                 records.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                malas += 1
+                if malas <= 5:
+                    print(f"  [!] Línea {i} del manifiesto ignorada (JSON inválido: {exc}).")
+        if malas:
+            print(f"[manifiesto] {malas} línea(s) con JSON inválido ignoradas; "
+                  f"{len(records)} válidas.")
         return records
 
     if ext == ".json":

@@ -525,6 +525,21 @@ class TestManifestReader:
         recs = _dig._read_manifest_records(m)
         assert recs[0]["label"] == "1"        # csv → strings
 
+    def test_jsonl_linea_corrupta_no_tumba_el_resto(self, tmp_path):
+        # una fila con JSON inválido se salta con aviso; las buenas se leen
+        m = tmp_path / "man.jsonl"
+        m.write_text(
+            "\n".join([
+                '{"id":"a","image":"a.png","label":1}',
+                'ESTO NO ES JSON {{{',
+                '',
+                '{"id":"b","image":"b.png","label":0}',
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        recs = _dig._read_manifest_records(m)
+        assert len(recs) == 2 and {r["id"] for r in recs} == {"a", "b"}
+
     def test_extension_no_soportada_falla(self, tmp_path):
         m = tmp_path / "man.txt"
         m.write_text("x", encoding="utf-8")
@@ -595,6 +610,20 @@ class TestVLMManifest:
         d = DataDigestor(mode="vlm", auto_enrich=False)
         d.from_vlm_manifest(m, require_images=False)
         assert len(d.get_examples()) == 3      # m3 se mantiene (ruta sin resolver)
+
+    def test_label_no_escalar_se_descarta_sin_crash(self, tmp_path):
+        # label lista/dict (manifiesto malformado) no debe reventar el label_map
+        recs = [
+            {"id": "ok", "image": "m1.png", "label": 1},
+            {"id": "lista", "image": "m2.png", "label": [1, 2]},
+            {"id": "dict", "image": "m1.png", "label": {"x": 1}},
+        ]
+        m = _mk_vlm(tmp_path, recs)
+        d = DataDigestor(mode="vlm", label_map={1: "YES", 0: "NO"}, auto_enrich=False)
+        d.from_vlm_manifest(m)                 # no lanza
+        ex = d.get_examples()
+        assert len(ex) == 1                    # solo el escalar sobrevive
+        assert ex[0]["messages"][1]["content"] == "YES"
 
     def test_output_invalido_falla(self, tmp_path):
         m = _mk_vlm(tmp_path, _VLM_RECS)
