@@ -637,12 +637,20 @@ class TestContextOverflow:
     desbordamiento de contexto es culpa del prompt del cliente (400), no un
     fallo interno (500)."""
 
-    def test_overflow_da_400_context_length_exceeded(self):
+    # llama-cpp no tiene un tipo de excepción propio para esto: hay que
+    # reconocerlo por TEXTO, y el texto cambia entre versiones/caminos. Ambos
+    # mensajes están observados EN VIVO contra el serve real (17 jul): el
+    # segundo apareció con 0.3.28 + chat handler y devolvía un 500 opaco porque
+    # el fix solo conocía el primero. Parametrizado para que no vuelva a morir
+    # en silencio al actualizar llama-cpp.
+    @pytest.mark.parametrize("msg", [
+        "Requested tokens (75470) exceed context window of 65536",
+        "Prompt exceeds n_ctx: 40108 > 16384",
+    ])
+    def test_overflow_da_400_context_length_exceeded(self, msg):
         from fastapi import HTTPException
-        # Mensaje real de llama-cpp 0.3.28 (verificado en vivo)
-        exc = ValueError("Requested tokens (75470) exceed context window of 65536")
         with pytest.raises(HTTPException) as ei:
-            server._raise_inference_error(exc)
+            server._raise_inference_error(ValueError(msg))
         assert ei.value.status_code == 400
         assert "context_length_exceeded" in ei.value.detail
         assert "MOTOR_N_CTX" in ei.value.detail  # pista accionable para el operador
@@ -706,6 +714,16 @@ class TestBuildVisionHandler:
         monkeypatch.setenv("MOTOR_MMPROJ", "/no/existe/mmproj.gguf")
         assert server._build_vision_handler() is None      # no lanza
         assert "AVISO" in capsys.readouterr().out
+
+    def test_mmproj_corrupto_degrada(self, monkeypatch, tmp_path, capsys):
+        # Fichero que existe pero NO es un GGUF (descarga a medias). llama-cpp
+        # no lo valida al construir el handler → sin esta comprobación se
+        # anunciaba "Visión ACTIVA" y /health mentía (verificado en vivo 17-jul).
+        malo = tmp_path / "mmproj.gguf"
+        malo.write_bytes(b"basura no gguf")
+        monkeypatch.setenv("MOTOR_MMPROJ", str(malo))
+        assert server._build_vision_handler() is None      # no lanza
+        assert "no es un GGUF" in capsys.readouterr().out
 
     def test_handler_inexistente_degrada(self, monkeypatch, tmp_path, capsys):
         fake = tmp_path / "mmproj.gguf"

@@ -120,6 +120,26 @@ def _build_vision_handler():
               f"arrancando en modo TEXTO (sin visión).")
         return None
 
+    # llama-cpp NO valida el proyector al construir el handler (lo carga en la
+    # primera imagen). Sin esta comprobación, un fichero truncado/erróneo se
+    # anunciaba como "Visión ACTIVA" y /health mentía: cada imagen devolvía 500
+    # ("Failed to load mtmd context"). Comprobar la cabecera es barato y ataja
+    # el error real del operador (fichero a medio bajar o ruta equivocada).
+    # Límite honesto: un GGUF válido PERO de otro modelo sí pasa este filtro y
+    # fallará al inferir — ahí el mensaje de llama-cpp ya nombra el fichero.
+    try:
+        with open(mmproj, "rb") as fh:
+            magic = fh.read(4)
+    except OSError as exc:
+        print(f"[Server] AVISO: no se pudo leer MOTOR_MMPROJ={mmproj} ({exc}) "
+              f"→ modo TEXTO (sin visión).")
+        return None
+    if magic != b"GGUF":
+        print(f"[Server] AVISO: {Path(mmproj).name} no es un GGUF válido "
+              f"(cabecera {magic!r}) → modo TEXTO (sin visión). "
+              f"¿Descarga incompleta o ruta equivocada?")
+        return None
+
     handler_name = os.environ.get("MOTOR_MMPROJ_HANDLER", "Gemma4ChatHandler")
     try:
         from llama_cpp import llama_chat_format as _fmt
@@ -706,14 +726,32 @@ def _content_for_log(content: Any) -> str:
     return _oai_content_to_text(content)
 
 
+# Marcadores de desbordamiento de contexto. llama-cpp NO usa un tipo de
+# excepción propio ni un mensaje estable: hay que reconocerlo por texto, y el
+# texto CAMBIA entre versiones y caminos de código. Vistos en vivo:
+#   - "Requested tokens (40108) exceed context window of 4096"  (llama-cpp viejo)
+#   - "Prompt exceeds n_ctx: 40108 > 16384"                     (0.3.28 / chat handler)
+# Una lista con ambos evita que el fix se muera en silencio al actualizar.
+_CTX_OVERFLOW_MARKERS = (
+    "exceed context window",
+    "exceeds n_ctx",
+    "exceed n_ctx",
+)
+
+
+def _is_context_overflow(exc: Exception) -> bool:
+    """True si la excepción es un desbordamiento del contexto del modelo."""
+    msg = str(exc).lower()
+    return any(m in msg for m in _CTX_OVERFLOW_MARKERS)
+
+
 def _raise_inference_error(exc: Exception, context: str = "Error en inferencia"):
     """Traduce una excepción de inferencia a HTTPException con el código
-    adecuado. El desbordamiento de contexto de llama.cpp ('Requested tokens (N)
-    exceed context window of M') es culpa del prompt del cliente, no del
-    servidor → 400 `context_length_exceeded` en vez de un 500 opaco. El resto
-    de errores siguen siendo 500."""
+    adecuado. El desbordamiento de contexto es culpa del prompt del cliente, no
+    del servidor → 400 `context_length_exceeded` en vez de un 500 opaco. El
+    resto de errores siguen siendo 500. Ver `_CTX_OVERFLOW_MARKERS`."""
     from fastapi import HTTPException
-    if "exceed context window" in str(exc).lower():
+    if _is_context_overflow(exc):
         raise HTTPException(status_code=400, detail=(
             f"context_length_exceeded: {exc}. El prompt supera el contexto del "
             f"modelo — reduce el historial/documentos, o sirve con MOTOR_N_CTX "
