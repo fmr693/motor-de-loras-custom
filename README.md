@@ -5,7 +5,7 @@
 > sobre cualquier modelo open-source, y lo sirve de principio a fin. **Sin nube. 0 €/consulta. 100% privado.**
 
 **Origen:** pipeline EXIST 2025 (detección de sexismo en memes) generalizado a una fábrica reutilizable.
-**Estado:** 604 tests · 0 fallos · 15 comandos CLI · Docker (CPU y GPU) · modelo base actual **Gemma 4 12B** a ~50 tok/s en RTX 4080 · contexto configurable hasta 64K (caché KV cuantizable) · RAG verificado · aprendizaje híbrido (feedback humano + reflexión) · Digestor multi-modo (clasificar/destilar/conocimiento/VLM) con router `--mode auto` en el CLI · compatible con frontends agénticos (Odysseus y Hermes).
+**Estado:** 606 tests · 0 fallos · 15 comandos CLI · Docker (CPU y GPU) · modelo base actual **Gemma 4 12B** a ~50 tok/s en RTX 4080 · contexto configurable hasta 64K (caché KV cuantizable) · RAG verificado · aprendizaje híbrido (feedback humano + reflexión) · Digestor multi-modo (clasificar/destilar/conocimiento/VLM) con router `--mode auto` en el CLI · compatible con frontends agénticos (Odysseus y Hermes).
 
 ---
 
@@ -139,7 +139,7 @@ El servidor expone una API estilo OpenAI, así que **cualquier frontend compatib
 
 ## Tests
 
-604 tests · 0 fallos · tres capas (unitaria, integración E2E, comportamiento).
+606 tests · 0 fallos · tres capas (unitaria, integración E2E, comportamiento).
 
 ```bash
 PYTHONUTF8=1 python -m pytest tests/ -q       # suite completa

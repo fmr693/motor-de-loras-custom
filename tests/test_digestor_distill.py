@@ -640,6 +640,30 @@ class TestCLIVLM:
         assert rows[0]["messages"][1]["content"] == "YES"
         assert rows[0]["messages"][0]["content"][1]["text"] == "T:a\nQ"
 
+    def test_cli_vlm_sin_manifest_con_fichero_avisa(self, tmp_path):
+        # --mode vlm sin --manifest y con --data no-carpeta: antes despachaba
+        # por tipo de fichero (hacía classify en silencio); ahora avisa.
+        csv = tmp_path / "datos.csv"
+        csv.write_text("text,label\nx,1\n", encoding="utf-8")
+        out = tmp_path / "out.jsonl"
+        with pytest.raises(SystemExit):
+            _run_cli(["digestor", "--mode", "vlm", "--task", "¿Qué ves?",
+                      "--data", str(csv), "--output", str(out)])
+
+    def test_cli_vlm_sin_manifest_carpeta_de_imagenes(self, tmp_path):
+        # retrocompat: etiquetas por subcarpeta, --task es la pregunta
+        (tmp_path / "GATO").mkdir()
+        (tmp_path / "PERRO").mkdir()
+        (tmp_path / "GATO" / "a.png").write_bytes(b"\x89PNG\r\n")
+        (tmp_path / "PERRO" / "b.png").write_bytes(b"\x89PNG\r\n")
+        out = tmp_path / "vlm.jsonl"
+        _run_cli(["digestor", "--mode", "vlm", "--task", "¿Qué animal es?",
+                  "--data", str(tmp_path), "--output", str(out)])
+        rows = _rows(out)
+        assert len(rows) == 2
+        etiquetas = {r["messages"][1]["content"] for r in rows}
+        assert etiquetas == {"GATO", "PERRO"}
+
     def test_cli_vlm_meta_holdout(self, tmp_path):
         m = self._mk(tmp_path)
         out = tmp_path / "holdout.meta.jsonl"

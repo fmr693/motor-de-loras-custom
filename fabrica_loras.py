@@ -210,6 +210,16 @@ def _cmd_digestor(args: argparse.Namespace) -> None:
             _digestor_export(digestor, args)
         return
 
+    # ── Modo vlm SIN manifiesto: etiquetas por subcarpeta (retrocompat) ─
+    # Exige una carpeta de imágenes: sin esto, un --data no-imagen caería al
+    # despacho por tipo de fichero de abajo y haría classify en silencio.
+    if mode == "vlm" and not os.path.isdir(args.data):
+        print("[ERROR] --mode vlm sin --manifest requiere que --data sea una "
+              "carpeta de imágenes\n"
+              "        (las etiquetas salen del nombre de cada subcarpeta).\n"
+              "        Para etiquetas, prompt por ejemplo o splits, usa --manifest.")
+        sys.exit(1)
+
     # ── Modo classify (default, retrocompatible con EXIST) o vlm ───────
     # (una carpeta de solo imágenes se enruta a VLM aquí abajo; --task es la
     #  pregunta del VLM en ese caso).
@@ -232,12 +242,15 @@ def _cmd_digestor(args: argparse.Namespace) -> None:
         skip_nulls=not args.keep_nulls,
         model_id=getattr(args, "model", None),
         domain=getattr(args, "domain", None),
+        mode=mode,
     )
 
     # --- Detectar si --data es fichero o carpeta ---
     data_path = args.data
     ocr_mode  = getattr(args, "ocr", False)
-    vlm_mode  = getattr(args, "vlm", False)
+    # `--mode vlm` explícito fuerza VLM igual que el flag legacy `--vlm`: una
+    # carpeta mixta no debe caer a OCR/texto cuando el usuario pidió VLM.
+    vlm_mode  = getattr(args, "vlm", False) or mode == "vlm"
 
     if os.path.isdir(data_path):
         # Comprobar si la carpeta contiene SOLO imágenes (sin CSV/JSON/TXT)
