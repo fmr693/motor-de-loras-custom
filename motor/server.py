@@ -69,6 +69,8 @@ class _ServerState:
     tokenizer      = None
     llama_model    = None   # llama-cpp-python (GGUF mode)
     is_gguf: bool  = False
+    # Visión activa: el GGUF se cargó con un mmproj (ver MOTOR_MMPROJ).
+    vision_ready: bool = False
     model_path: str = ""
     base_model_id: str = ""
     is_adapter: bool = False
@@ -93,6 +95,51 @@ _state = _ServerState()
 # ---------------------------------------------------------------------------
 # Carga del modelo (reutiliza lógica de _cmd_chat)
 # ---------------------------------------------------------------------------
+
+def _build_vision_handler():
+    """
+    Construye el chat handler de visión si `MOTOR_MMPROJ` apunta a un mmproj.
+
+    El mmproj es el proyector de visión: convierte la imagen en embeddings que
+    el MISMO GGUF de texto ya entiende. No hace falta servir los pesos completos
+    ni otro modelo — solo este fichero (~175 MB para Gemma 4 12B).
+
+    Devuelve None (modo texto) si no se pidió visión o si no se pudo montar.
+    NUNCA lanza: un mmproj ausente o una llama-cpp sin soporte degradan a texto
+    con aviso claro, en vez de tumbar el serve.
+
+    Handler por familia (`MOTOR_MMPROJ_HANDLER`, def. auto por nombre de modelo).
+    """
+    import os
+    mmproj = os.environ.get("MOTOR_MMPROJ", "").strip()
+    if not mmproj:
+        return None
+
+    if not Path(mmproj).exists():
+        print(f"[Server] AVISO: MOTOR_MMPROJ={mmproj} no existe → "
+              f"arrancando en modo TEXTO (sin visión).")
+        return None
+
+    handler_name = os.environ.get("MOTOR_MMPROJ_HANDLER", "Gemma4ChatHandler")
+    try:
+        from llama_cpp import llama_chat_format as _fmt
+        HandlerCls = getattr(_fmt, handler_name)
+    except (ImportError, AttributeError):
+        print(f"[Server] AVISO: esta llama-cpp-python no tiene "
+              f"'{handler_name}' → modo TEXTO (sin visión). "
+              f"Actualiza llama-cpp-python o ajusta MOTOR_MMPROJ_HANDLER.")
+        return None
+
+    try:
+        handler = HandlerCls(clip_model_path=mmproj, verbose=False)
+    except Exception as exc:
+        print(f"[Server] AVISO: no se pudo cargar el mmproj ({exc}) → "
+              f"modo TEXTO (sin visión).")
+        return None
+
+    print(f"[Server] Visión ACTIVA: {handler_name} + {Path(mmproj).name}")
+    return handler
+
 
 def load_model(
     model_path: str,
@@ -128,11 +175,21 @@ def load_model(
         print(_hw)
         llama_kw = _hw.llama_kwargs()
         print(f"[Server] Parámetros llama-cpp: {llama_kw}")
+
+        # ── Visión opcional (MOTOR_MMPROJ) ──────────────────────────────
+        # El mismo GGUF de texto gana visión al cargarle el proyector
+        # (mmproj) con el chat handler de la familia. Si algo falla, se
+        # sigue en modo TEXTO con aviso: nunca romper el serve por esto.
+        chat_handler = _build_vision_handler()
+        if chat_handler is not None:
+            llama_kw["chat_handler"] = chat_handler
+
         _state.llama_model = Llama(
             model_path = model_path,
             **llama_kw,
         )
         _state.is_gguf     = True
+        _state.vision_ready = chat_handler is not None
         n_layers = llama_kw.get("n_gpu_layers", 0)
         _state.gpu_name    = _hw.gpu_name if _hw.cuda_available and n_layers != 0 else "CPU (GGUF)"
         _state.vram_total_gb = _hw.vram_total_gb
@@ -455,6 +512,8 @@ try:
         dtype:         str
         load_time_s:   float
         uptime_s:      float
+        # True si el GGUF se cargó con mmproj → acepta imágenes (visión).
+        vision:        bool = False
         hardware:      Optional[Dict[str, Any]] = None
 
     class AgentRequest(_BaseModel):
@@ -600,6 +659,51 @@ def _oai_content_to_text(content: Any) -> str:
                 parts.append(part)
         return "\n".join(parts)
     return str(content)
+
+
+# Tipos de parte que transportan una imagen en el formato OpenAI.
+_IMAGE_PART_TYPES = ("image_url", "input_image", "image")
+
+
+def _has_image_part(content: Any) -> bool:
+    """True si el content trae alguna parte de imagen."""
+    return isinstance(content, list) and any(
+        isinstance(p, dict) and p.get("type") in _IMAGE_PART_TYPES
+        for p in content
+    )
+
+
+def _oai_content_for_model(content: Any) -> Any:
+    """Content tal y como debe llegar al modelo.
+
+    Con visión activa, las partes de imagen se PRESERVAN en formato OpenAI (el
+    chat handler de llama-cpp las consume así). Sin visión, o sin imágenes, se
+    aplana a texto como siempre — `_oai_content_to_text` descarta las imágenes,
+    por eso el endpoint rechaza antes las peticiones con imagen sin visión.
+    """
+    if _state.vision_ready and _has_image_part(content):
+        return content
+    return _oai_content_to_text(content)
+
+
+def _content_for_log(content: Any) -> str:
+    """Aplana content a texto para el LOG y los conteos.
+
+    Las imágenes se anotan como '[imagen]', nunca su base64: el log canónico
+    (Regla 11) lo releen learn/DPO, y un data-URI de megabytes lo envenenaría
+    y dispararía la rotación del fichero.
+    """
+    if isinstance(content, list):
+        parts = []
+        for p in content:
+            if isinstance(p, dict) and p.get("type") in _IMAGE_PART_TYPES:
+                parts.append("[imagen]")
+            elif isinstance(p, dict) and p.get("type") == "text":
+                parts.append(str(p.get("text", "")))
+            elif isinstance(p, str):
+                parts.append(p)
+        return "\n".join(parts)
+    return _oai_content_to_text(content)
 
 
 def _raise_inference_error(exc: Exception, context: str = "Error en inferencia"):
@@ -1440,6 +1544,7 @@ def create_app() -> "fastapi.FastAPI":
             vram_total_gb = round(_state.vram_total_gb, 2),
             vram_used_gb  = round(vram_used, 2),
             dtype         = _state.dtype_str,
+            vision        = _state.vision_ready,
             load_time_s   = _state.load_time_s,
             uptime_s      = round(time.time() - _start_time, 1),
             hardware      = hw_dict,
@@ -1504,9 +1609,25 @@ def create_app() -> "fastapi.FastAPI":
         # Convertir mensajes al formato interno (normalizando content y
         # preservando los campos de tool-calling, necesarios para que el
         # historial de un loop agéntico llegue íntegro al chat template)
+        # Una imagen sin visión activa se perdería al aplanar el content → el
+        # modelo respondería sobre la nada. Mejor un 400 explícito que una
+        # respuesta silenciosamente equivocada.
+        if any(_has_image_part(m.content) for m in req.messages) \
+                and not _state.vision_ready:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": ("Este serve está en modo TEXTO: la petición trae "
+                                "una imagen y se habría ignorado. Arranca el perfil "
+                                "multimodal (MOTOR_MMPROJ con el mmproj del modelo) "
+                                "para habilitar visión."),
+                    "type": "vision_not_available",
+                },
+            )
+
         messages = []
         for m in req.messages:
-            d: dict = {"role": m.role, "content": _oai_content_to_text(m.content)}
+            d: dict = {"role": m.role, "content": _oai_content_for_model(m.content)}
             if m.tool_calls:
                 d["tool_calls"] = m.tool_calls
             if m.tool_call_id:
@@ -1530,10 +1651,12 @@ def create_app() -> "fastapi.FastAPI":
         # El id OpenAI sirve también como interaction_id del log: el cliente
         # lo recibe (body o chunks SSE) y puede enviarlo a POST /feedback.
         chat_id = f"chatcmpl-{uuid.uuid4().hex}"
-        # Último mensaje del usuario → clave de agrupación de DPOBuilder
-        user_msg = next(
+        # Último mensaje del usuario → clave de agrupación de DPOBuilder.
+        # Se aplana SIEMPRE a texto: con visión, content puede ser una lista
+        # con un data-URI, que no debe entrar al log (ver _content_for_log).
+        user_msg = _content_for_log(next(
             (m["content"] for m in reversed(messages) if m["role"] == "user"), ""
-        )
+        ))
 
         # En modo GGUF, rango seguro: ni muy fría (repeticiones) ni muy caliente
         # (incoherencia). El tope depende de la familia: la ficha oficial de
@@ -1735,7 +1858,9 @@ def create_app() -> "fastapi.FastAPI":
 
         if not usage:
             # Fallback si llama-cpp no devolvió usage: estimación chars//4
-            prompt_chars = sum(len(m["content"] or "") for m in messages)
+            # (_content_for_log aplana: con visión, content puede ser lista)
+            prompt_chars = sum(len(_content_for_log(m.get("content")) or "")
+                               for m in messages)
             usage = {
                 "prompt_tokens":     prompt_chars // 4,
                 "completion_tokens": len(response_text) // 4,

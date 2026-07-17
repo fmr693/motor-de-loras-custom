@@ -130,6 +130,56 @@ services:
       retries: 3
       start_period: 60s
 
+  # ── Motor Serve MULTIMODAL — GGUF + visión (mmproj), perfil multimodal ─
+  # MISMA imagen y MISMO GGUF que motor-serve-gpu: la visión se activa
+  # cargando el proyector (mmproj, ~175 MB) con Gemma4ChatHandler. No hace
+  # falta servir los pesos completos ni otro modelo.
+  #   docker compose -f docker-compose.unificado.yml --profile multimodal up -d motor-serve-mm
+  #
+  # ALTERNO a motor-serve-gpu, NO simultáneo: a 64k/Q4 la RTX 4080 queda con
+  # ~0,4 GB libres (Regla 14) y el mmproj no cabe. Por eso este perfil sirve a
+  # n_ctx menor (16k por defecto). Consecuencia: Hermes (suelo duro 64k) NO
+  # funciona contra este serve — usa el perfil gpu para el día a día y este
+  # solo cuando necesites imágenes.
+  motor-serve-mm:
+    build:
+      context: .
+      dockerfile: Dockerfile.serve-gpu
+    profiles:
+      - multimodal
+    ports:
+      # 8002 en el host: no colisiona con el CPU (8000) ni el GPU texto (8001).
+      - "8002:8000"
+    volumes:
+      - ./logs:/app/logs
+      - ./promotion:/app/promotion
+      - ./modelos:/app/modelos
+    environment:
+      - MODEL_PATH=${MOTOR_MODEL:-modelos/gemma4_12b/gemma-4-12B-it-Q4_K_M.gguf}
+      - NVIDIA_VISIBLE_DEVICES=all
+      # El proyector de visión. Si falta o la llama-cpp no trae el handler,
+      # el serve arranca en modo TEXTO con aviso (nunca rompe).
+      - MOTOR_MMPROJ=${MOTOR_MMPROJ:-modelos/gemma4_12b/mmproj-F16.gguf}
+      - MOTOR_MMPROJ_HANDLER=${MOTOR_MMPROJ_HANDLER:-Gemma4ChatHandler}
+      # Contexto reducido: hay que dejar VRAM para el mmproj y los embeddings
+      # de imagen (a 64k no cabrían).
+      - MOTOR_N_CTX=${MOTOR_MM_N_CTX:-16384}
+      - MOTOR_KV_TYPE=${MOTOR_MM_KV_TYPE:-q4}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
   # ── Motor Worker — Entrenamiento GPU (on-demand) ──────────────────
   motor-worker:
     build:

@@ -654,3 +654,102 @@ class TestContextOverflow:
         assert ei.value.status_code == 500
         assert "boom" in ei.value.detail
         assert "context_length_exceeded" not in ei.value.detail
+
+
+# ---------------------------------------------------------------------------
+# 6. Visión (mmproj): imágenes en /v1, degradación e higiene del log
+# ---------------------------------------------------------------------------
+
+# data-URI mínimo (el contenido no importa: el modelo está stubbeado)
+_IMG_B64 = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+
+def _msg_con_imagen(texto="¿Qué ves?"):
+    return [{"role": "user", "content": [
+        {"type": "text", "text": texto},
+        {"type": "image_url", "image_url": {"url": _IMG_B64}},
+    ]}]
+
+
+class TestHelpersVision:
+    def test_has_image_part(self):
+        assert server._has_image_part(_msg_con_imagen()[0]["content"])
+        assert not server._has_image_part("solo texto")
+        assert not server._has_image_part([{"type": "text", "text": "hola"}])
+
+    def test_content_for_log_no_filtra_base64(self):
+        # el log canónico alimenta learn/DPO: nunca debe llevar el data-URI
+        out = server._content_for_log(_msg_con_imagen("mira esto")[0]["content"])
+        assert "mira esto" in out and "[imagen]" in out
+        assert "base64" not in out and "iVBORw0" not in out
+
+    def test_content_for_model_sin_vision_aplana(self):
+        server._state.vision_ready = False
+        out = server._oai_content_for_model(_msg_con_imagen()[0]["content"])
+        assert isinstance(out, str)          # aplanado (la imagen se perdería)
+
+    def test_content_for_model_con_vision_preserva(self):
+        server._state.vision_ready = True
+        try:
+            out = server._oai_content_for_model(_msg_con_imagen()[0]["content"])
+            assert isinstance(out, list)     # se preserva para el chat handler
+            assert any(p.get("type") == "image_url" for p in out)
+        finally:
+            server._state.vision_ready = False
+
+
+class TestBuildVisionHandler:
+    def test_sin_mmproj_es_modo_texto(self, monkeypatch):
+        monkeypatch.delenv("MOTOR_MMPROJ", raising=False)
+        assert server._build_vision_handler() is None
+
+    def test_mmproj_inexistente_degrada_sin_romper(self, monkeypatch, capsys):
+        monkeypatch.setenv("MOTOR_MMPROJ", "/no/existe/mmproj.gguf")
+        assert server._build_vision_handler() is None      # no lanza
+        assert "AVISO" in capsys.readouterr().out
+
+    def test_handler_inexistente_degrada(self, monkeypatch, tmp_path, capsys):
+        fake = tmp_path / "mmproj.gguf"
+        fake.write_bytes(b"GGUF")
+        monkeypatch.setenv("MOTOR_MMPROJ", str(fake))
+        monkeypatch.setenv("MOTOR_MMPROJ_HANDLER", "HandlerQueNoExiste")
+        assert server._build_vision_handler() is None      # no lanza
+        assert "AVISO" in capsys.readouterr().out
+
+
+class TestVisionEndpoint:
+    def test_imagen_sin_vision_da_400_explicito(self, client):
+        server._state.vision_ready = False
+        r = client.post("/v1/chat/completions", json={"messages": _msg_con_imagen()})
+        assert r.status_code == 400        # nunca ignorarla en silencio
+        assert r.json()["detail"]["type"] == "vision_not_available"
+
+    def test_imagen_con_vision_llega_intacta_al_modelo(self, client):
+        server._state.vision_ready = True
+        try:
+            r = client.post("/v1/chat/completions", json={"messages": _msg_con_imagen()})
+            assert r.status_code == 200
+            sent = server._state.llama_model.last_kwargs["messages"]
+            user = next(m for m in sent if m["role"] == "user")
+            assert isinstance(user["content"], list)
+            assert any(p.get("type") == "image_url" for p in user["content"])
+        finally:
+            server._state.vision_ready = False
+
+    def test_el_log_no_guarda_el_base64(self, client):
+        server._state.vision_ready = True
+        try:
+            client.post("/v1/chat/completions", json={"messages": _msg_con_imagen("describe")})
+            rows = _read_log()
+            assert rows, "deberia haber logueado la interaccion"
+            um = rows[-1]["user_msg"]
+            assert "describe" in um and "[imagen]" in um
+            assert "iVBORw0" not in um and "base64" not in um
+        finally:
+            server._state.vision_ready = False
+
+    def test_health_expone_vision(self, client):
+        server._state.vision_ready = True
+        try:
+            assert client.get("/health").json()["vision"] is True
+        finally:
+            server._state.vision_ready = False

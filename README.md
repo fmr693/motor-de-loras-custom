@@ -5,7 +5,7 @@
 > sobre cualquier modelo open-source, y lo sirve de principio a fin. **Sin nube. 0 €/consulta. 100% privado.**
 
 **Origen:** pipeline EXIST 2025 (detección de sexismo en memes) generalizado a una fábrica reutilizable.
-**Estado:** 606 tests · 0 fallos · 15 comandos CLI · Docker (CPU y GPU) · modelo base actual **Gemma 4 12B** a ~50 tok/s en RTX 4080 · contexto configurable hasta 64K (caché KV cuantizable) · RAG verificado · aprendizaje híbrido (feedback humano + reflexión) · Digestor multi-modo (clasificar/destilar/conocimiento/VLM) con router `--mode auto` en el CLI · compatible con frontends agénticos (Odysseus y Hermes).
+**Estado:** 617 tests · 0 fallos · 15 comandos CLI · Docker (CPU y GPU) · modelo base actual **Gemma 4 12B** a ~50 tok/s en RTX 4080 · contexto configurable hasta 64K (caché KV cuantizable) · RAG verificado · **visión** (imágenes vía mmproj, perfil multimodal) · aprendizaje híbrido (feedback humano + reflexión) · Digestor multi-modo (clasificar/destilar/conocimiento/VLM) con router `--mode auto` en el CLI · compatible con frontends agénticos (Odysseus y Hermes).
 
 ---
 
@@ -40,7 +40,7 @@ El Motor funciona con cualquier modelo de HuggingFace (Qwen, Llama, Mistral, Phi
 | `trainer_llm.py` | LLMTrainer: LoRA (PEFT+TRL) sobre cualquier modelo. Soporta `gemma4_unified`. |
 | `trainer_vlm.py` | VLMTrainer: igual para modelos visión-lenguaje. |
 | `exporter.py` | ExportManager: merge adapter+base → safetensors o GGUF (Q4_K_M). |
-| `server.py` | FastAPI: API compatible OpenAI (`/v1/chat/completions`), `/agent`, `/feedback`, streaming, logging. |
+| `server.py` | FastAPI: API compatible OpenAI (`/v1/chat/completions`), `/agent`, `/feedback`, streaming, logging. **Visión opcional**: con `MOTOR_MMPROJ` carga el proyector y acepta imágenes (formato visión de OpenAI). |
 | `agent.py` | LoRAAgent (ReAct): razonamiento + uso de herramientas. |
 | `domestic_tools.py` | Herramientas reales: organizar archivos, correo, calendario, notas, búsqueda, procesos. |
 | `continual.py` | ContinualLearner: replay buffer, rollback automático, registro. |
@@ -111,8 +111,11 @@ docker compose up -d
 # Stack unificado con Odysseus (6 servicios)
 docker compose -f docker-compose.unificado.yml up -d
 
-# Servir en GPU (RTX 4080)
+# Servir en GPU (RTX 4080) — texto, 64K (el driver diario)
 docker compose -f docker-compose.unificado.yml --profile gpu up -d motor-serve-gpu
+
+# Servir con VISIÓN (mismo GGUF + mmproj, 16K) — ALTERNO al anterior, no simultáneo
+docker compose -f docker-compose.unificado.yml --profile multimodal up -d motor-serve-mm
 
 # Ciclo de entrenamiento (GPU, on-demand)
 docker compose -f docker-compose.unificado.yml --profile train up motor-worker
@@ -139,7 +142,7 @@ El servidor expone una API estilo OpenAI, así que **cualquier frontend compatib
 
 ## Tests
 
-606 tests · 0 fallos · tres capas (unitaria, integración E2E, comportamiento).
+617 tests · 0 fallos · tres capas (unitaria, integración E2E, comportamiento).
 
 ```bash
 PYTHONUTF8=1 python -m pytest tests/ -q       # suite completa
