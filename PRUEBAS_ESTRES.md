@@ -14,10 +14,12 @@
 > sistema resista la realidad. Un test puede ser teatro: si mockea una cadena o prueba
 > un único caso feliz, pasa en verde mientras el sistema real se rompe.**
 
-Las tres rondas confirman lo mismo: **cada vez que apretamos de verdad (E2E, contra el
+Las cuatro rondas confirman lo mismo: **cada vez que apretamos de verdad (E2E, contra el
 serve real, con entradas hostiles), aparecen costuras que 600+ tests en verde no veían.**
 No porque los tests estén mal, sino porque prueban lo que *imaginamos* que puede fallar.
-El estrés prueba lo que *de verdad* falla.
+El estrés prueba lo que *de verdad* falla. Y las costuras se vuelven más sutiles ronda a
+ronda: de "2 peticiones lo tumban" a "el log pierde datos bajo concurrencia" a "dedup
+tarda 2 h con un corpus real" — cada vez más cerca del propósito del proyecto.
 
 Dos ejemplos crudos de "test-teatro" detectados en estas rondas:
 
@@ -155,6 +157,46 @@ serve. *La prueba de estrés se estresó a sí misma.* Y al escribir un test met
 con `git checkout`). **Corolario:** el instrumental de la prueba es tan falible como el
 sistema probado; git es la red de seguridad que permite ser agresivo sin miedo.
 
+### Ronda 4 — Afianzar el ecosistema: el dato bajo concurrencia (2 fallos serios)
+
+Contexto: "casi al 100%". Hipótesis dirigidas al **activo del proyecto (el dataset)** y
+al pipeline de datos, más un blitz de ecosistema completo y visión hostil a escala.
+
+**Lo que aguantó:**
+- **Blitz de ecosistema**: 16 hilos mezclando texto + tools + streaming + feedback +
+  overflow + encoding roto + imagen inválida contra el serve real, 481 s → **serve sin
+  crash** (RestartCount 0, health 200); los hostiles que pasaron → **400 correctos bajo
+  concurrencia** (invalid_image, invalid_encoding, context_length_exceeded).
+- **Visión hostil a escala** (perfil mm): imagen 3000×3000 → OK; base64 truncado y
+  data-URI vacío → **400 invalid_image**; mime mentiroso (jpeg/png) → decodifica por
+  contenido; 12 imágenes en un mensaje → sin crash; **4 imágenes concurrentes → 4/4 200**.
+- **Consolidación**: reconstruido el serve CPU (`:8000`) → salda la deuda de la ronda 3
+  (overflow ahora **400**, no 500) y recoge `_LOG_LOCK`.
+
+| # | Costura | Causa raíz | Familia | Fix |
+|---|---|---|---|---|
+| 1 🔴 | **race del log: interacciones PERDIDAS** | `_log_interaction` (append) y `/feedback` (reescritura total) sin lock → la reescritura pisa los appends intermedios | envenenar/perder el dato | `_LOG_LOCK` serializa ambos |
+| 2 | `deduplicate()` **O(n²)** → ~2 h con 50k | Jaccard todos-contra-todos en la pasada near-dupe | frágil a escala | `near_dupe_limit` (def 4000); degradar a exacta con aviso |
+
+**El hallazgo 1 es el más grave de las cuatro rondas para el propósito del proyecto:**
+el activo duradero es el **dataset**, no el adapter (decisión estratégica). Un log que
+pierde interacciones bajo concurrencia corrompe ese activo **en silencio** — medido:
+**39 de 300 interacciones perdidas + 1 corrupta** en segundos de concurrencia. Con
+Odysseus y Hermes escribiendo a la vez sobre el mismo serve, más los pulgares 👍/👎 de
+la UI reescribiendo el fichero, era cuestión de tiempo. Re-verificado E2E tras el fix:
+el blitz dejó **412 líneas, 0 corruptas, 0 duplicados, 37 con feedback**.
+
+**El hallazgo 2** es la clase de bug que no se ve hasta que el proyecto tiene éxito: con
+datasets de juguete (cientos de ejemplos) `deduplicate()` es instantáneo; el día que se
+acumule un corpus real de decenas de miles —justo el objetivo de "la fábrica como
+acumulación de conocimiento"— el pipeline se habría colgado ~2 h sin explicación.
+
+**Lección de la ronda 4:** las dos costuras estaban en el camino del **dato**, no de la
+inferencia — y el dato es la tesis del proyecto. *Estresa primero lo que más te importa
+perder.* Además, a mitad de ronda **Docker Desktop se cayó** (el `npipe` dejó de
+responder); se relanzó y se continuó. Otro recordatorio de la ronda 3: la infraestructura
+de la prueba falla tanto como el sistema.
+
 ---
 
 ## Principios destilados (hasta ahora)
@@ -211,8 +253,23 @@ accionables, y ningún lote (manifiesto, batch) cae entero por un elemento malo.
 
 - **Streaming abandonado** no cancela la generación server-side (ronda 3). Impacto real
   bajo para 1-2 usuarios; fix = detección de desconexión asíncrona (cambio de diseño).
-- **Serve CPU (`:8000`)** corre una imagen anterior a varios fixes; se sanea al
-  reconstruirlo.
+- ~~Serve CPU (`:8000`) corre una imagen anterior a varios fixes~~ → **saldado en la
+  ronda 4** (reconstruido; overflow → 400, `_LOG_LOCK` incluido).
+
+### Estado del ecosistema tras 4 rondas (17 jul 2026)
+
+- **Concurrencia**: inferencia serializada (`_INFER_LOCK`) y log serializado (`_LOG_LOCK`).
+  16 hilos mixtos + 4 imágenes concurrentes → 0 crashes.
+- **Entradas malformadas**: JSON/tipos → 422; imagen inválida, texto mal codificado,
+  contexto desbordado → **400 accionables** (no 500), verificado bajo concurrencia.
+- **Integridad del dato**: log íntegro bajo appends+feedback concurrentes (0 pérdidas);
+  al log entra `[imagen]`, nunca base64; label malformada se descarta.
+- **Visión**: honesta (valida mmproj antes de anunciar); robusta ante imagen grande,
+  base64 roto, mime mentiroso, multi-imagen y concurrencia.
+- **Digestor**: resiliente por elemento (manifiesto malformado no cae entero); dedup con
+  tope O(n²) avisado; BOM de Excel neutralizado; F4 idéntico al script bespoke sobre
+  datos reales.
+- **Deuda restante**: solo el streaming abandonado (caracterizado, bajo impacto).
 
 ### Cómo correr una ronda nueva
 
@@ -223,4 +280,4 @@ accionables, y ningún lote (manifiesto, batch) cae entero por un elemento malo.
 5. Re-verifica el ataque contra el sistema arreglado.
 6. Añade la fila a la tabla de su ronda y, si aparece una familia nueva, a la taxonomía.
 
-*Última actualización: 17 jul 2026 — tras la ronda 3.*
+*Última actualización: 17 jul 2026 — tras la ronda 4.*
