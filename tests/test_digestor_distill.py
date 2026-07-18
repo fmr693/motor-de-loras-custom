@@ -722,3 +722,45 @@ class TestCLIVLM:
         assert len(rows) == 1
         assert set(rows[0]) == {"id", "image", "prompt", "label"}
         assert rows[0]["label"] == "NO" and rows[0]["id"] == "m2"
+
+
+# ---------------------------------------------------------------------------
+# Ronda 4 de estrés — escalabilidad de deduplicate()
+# ---------------------------------------------------------------------------
+
+class TestDedupEscala:
+    def _make(self, n):
+        d = DataDigestor(mode="knowledge", auto_enrich=False)
+        d._examples = [{"messages": [
+            {"role": "system", "content": "s"},
+            {"role": "user", "content": f"pregunta única número {i} sobre tema {i%7}"},
+            {"role": "assistant", "content": f"respuesta única número {i} con detalle {i}"},
+        ]} for i in range(n)]
+        return d
+
+    def test_sobre_el_tope_omite_near_dupe_con_aviso(self, capsys):
+        # La pasada near-dupe es O(n²) (medido: 4000→51s, 50k→~2h). Sobre el
+        # tope degrada a solo-exacta CON AVISO, nunca se cuelga en silencio.
+        d = self._make(80)
+        d._examples.append(dict(d._examples[0]))          # 1 duplicado EXACTO
+        removed = d.deduplicate(near_dupe_limit=50)
+        assert removed == 1                                # la exacta sí corre
+        assert "AVISO" in capsys.readouterr().out          # y avisa qué omite
+
+    def test_bajo_el_tope_near_dupe_funciona(self):
+        d = self._make(30)
+        # near-dupe: mismo texto con una palabra cambiada (Jaccard > 0.9)
+        import copy
+        casi = copy.deepcopy(d._examples[0])
+        casi["messages"][2]["content"] = casi["messages"][2]["content"] + " extra"
+        d._examples.append(casi)
+        removed = d.deduplicate(near_dupe_limit=4000)
+        assert removed >= 1                                # el near-dupe cae
+
+    def test_tope_cero_fuerza_pasada_completa(self):
+        d = self._make(60)
+        import copy
+        casi = copy.deepcopy(d._examples[0])
+        casi["messages"][2]["content"] += " bis"
+        d._examples.append(casi)
+        assert d.deduplicate(near_dupe_limit=0) >= 1       # 0 = sin tope

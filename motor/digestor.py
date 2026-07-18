@@ -2584,7 +2584,8 @@ learning_rate: 2e-4
         union = words_a | words_b
         return len(intersection) / len(union)
 
-    def deduplicate(self, jaccard_threshold: float = 0.9) -> int:
+    def deduplicate(self, jaccard_threshold: float = 0.9,
+                    near_dupe_limit: int = 4000) -> int:
         """
         Elimina ejemplos duplicados — exactos y near-duplicados.
 
@@ -2599,6 +2600,11 @@ learning_rate: 2e-4
         ----------
         jaccard_threshold : float
             Umbral de similitud Jaccard para near-duplicados. Por defecto 0.9.
+        near_dupe_limit : int
+            Tope de ejemplos para la pasada near-dupe, que es O(n²): medido
+            (ronda 4 de estrés) 1000→3s, 2000→13s, 4000→51s, y extrapola a
+            ~2 HORAS con 50k. Por encima del tope se hace solo la dedup exacta
+            (O(n)) y se AVISA. 0 = sin tope (forzar la pasada completa).
 
         Devuelve
         --------
@@ -2659,6 +2665,19 @@ learning_rate: 2e-4
         # ── Segunda pasada: near-duplicados (solo entre los que sobrevivieron) ─
         survivors = [self._examples[i] for i in keep_indices]
         survivor_texts = [texts[i] for i in keep_indices]
+
+        # La comparación Jaccard todos-contra-todos es O(n²): por encima del
+        # tope se degrada a solo-exacta CON AVISO (nunca colgarse en silencio).
+        if near_dupe_limit and len(survivors) > near_dupe_limit:
+            print(f"[DataDigestor] AVISO: {len(survivors)} ejemplos superan el "
+                  f"tope near-dupe ({near_dupe_limit}); la pasada de "
+                  f"near-duplicados (O(n²), ~1 min con 4000) se OMITE — solo "
+                  f"dedup exacta. Fuerza con deduplicate(near_dupe_limit=0).")
+            self._examples = survivors
+            if removed_exact:
+                print(f"[DataDigestor] Deduplicación: {original_count} -> "
+                      f"{len(survivors)} (-{removed_exact} exactos)")
+            return removed_exact
 
         final_keep: List[int] = []
         # Para cada superviviente, comprobar contra los ya aceptados

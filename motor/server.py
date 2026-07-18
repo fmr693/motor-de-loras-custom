@@ -107,6 +107,13 @@ _state = _ServerState()
 # el generador (si el cliente corta, GeneratorExit lo libera igual).
 _INFER_LOCK = threading.RLock()
 
+# El log canónico (Regla 11) tiene DOS escritores: _log_interaction (append por
+# petición) y POST /feedback (read-modify-REWRITE del fichero entero). Sin lock,
+# la reescritura pisa los appends que llegan entre su lectura y su escritura:
+# medido en la ronda 4 de estrés, 39/300 interacciones PERDIDAS + 1 corrupta en
+# segundos de concurrencia. El dataset es el activo del proyecto → serializar.
+_LOG_LOCK = threading.Lock()
+
 
 # ---------------------------------------------------------------------------
 # Carga del modelo (reutiliza lógica de _cmd_chat)
@@ -471,33 +478,34 @@ def _log_interaction(
         log_path = Path(_state.interaction_log_path)
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Rotación por tamaño (default 50 MB, MOTOR_LOG_MAX_MB para cambiar):
-        # learn --auto y DPOBuilder releen el archivo entero, y un JSONL
-        # append-only infinito degrada el ciclo CL nocturno.
-        try:
-            max_mb = float(os.getenv("MOTOR_LOG_MAX_MB", "50"))
-            if log_path.exists() and log_path.stat().st_size > max_mb * 1024 * 1024:
-                stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d%H%M%S")
-                log_path.rename(log_path.with_suffix(f".{stamp}.jsonl"))
-        except Exception:
-            pass  # la rotación nunca bloquea el logging
-        _now = _dt.datetime.now(_dt.timezone.utc)
-        log_entry = {
-            "id":         interaction_id,
-            "timestamp":  _now.isoformat().replace("+00:00", "Z"),
-            "session_id": session_id,
-            "turn":       turn,
-            "user_msg":   user_msg,
-            "assistant":  assistant,
-            "model":      str(Path(_state.model_path).name),
-            "ms":         ms,
-            "endpoint":   endpoint,
-            "feedback":   None,   # se rellena via POST /feedback
-        }
-        if extra:
-            log_entry.update(extra)
-        with open(log_path, "a", encoding="utf-8") as _lf:
-            _lf.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+        with _LOG_LOCK:   # ver _LOG_LOCK: /feedback reescribe el fichero entero
+            # Rotación por tamaño (default 50 MB, MOTOR_LOG_MAX_MB para cambiar):
+            # learn --auto y DPOBuilder releen el archivo entero, y un JSONL
+            # append-only infinito degrada el ciclo CL nocturno.
+            try:
+                max_mb = float(os.getenv("MOTOR_LOG_MAX_MB", "50"))
+                if log_path.exists() and log_path.stat().st_size > max_mb * 1024 * 1024:
+                    stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d%H%M%S")
+                    log_path.rename(log_path.with_suffix(f".{stamp}.jsonl"))
+            except Exception:
+                pass  # la rotación nunca bloquea el logging
+            _now = _dt.datetime.now(_dt.timezone.utc)
+            log_entry = {
+                "id":         interaction_id,
+                "timestamp":  _now.isoformat().replace("+00:00", "Z"),
+                "session_id": session_id,
+                "turn":       turn,
+                "user_msg":   user_msg,
+                "assistant":  assistant,
+                "model":      str(Path(_state.model_path).name),
+                "ms":         ms,
+                "endpoint":   endpoint,
+                "feedback":   None,   # se rellena via POST /feedback
+            }
+            if extra:
+                log_entry.update(extra)
+            with open(log_path, "a", encoding="utf-8") as _lf:
+                _lf.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
     except Exception:
         pass  # el log nunca bloquea la respuesta
 
@@ -2210,40 +2218,44 @@ def create_app() -> "fastapi.FastAPI":
         if not log_path.exists():
             raise HTTPException(status_code=404, detail="Log de interacciones vacío.")
 
-        # Leer todas las líneas, actualizar la coincidente y reescribir
-        updated = False
-        lines: List[str] = []
-        with open(log_path, encoding="utf-8") as lf:
-            for raw in lf:
-                raw = raw.rstrip("\n")
-                if not raw:
-                    continue
-                try:
-                    entry = json.loads(raw)
-                except Exception:
-                    lines.append(raw)
-                    continue
-                if entry.get("id") == req.interaction_id:
-                    entry["feedback"] = req.rating
-                    if req.comment:
-                        entry["feedback_comment"] = req.comment
-                    updated = True
-                lines.append(json.dumps(entry, ensure_ascii=False))
+        # Leer todas las líneas, actualizar la coincidente y reescribir.
+        # TODO el ciclo va bajo _LOG_LOCK: sin él, los appends de peticiones
+        # concurrentes que llegan entre la lectura y la reescritura se PIERDEN
+        # (medido: 39/300 interacciones perdidas — ronda 4 de estrés).
+        with _LOG_LOCK:
+            updated = False
+            lines: List[str] = []
+            with open(log_path, encoding="utf-8") as lf:
+                for raw in lf:
+                    raw = raw.rstrip("\n")
+                    if not raw:
+                        continue
+                    try:
+                        entry = json.loads(raw)
+                    except Exception:
+                        lines.append(raw)
+                        continue
+                    if entry.get("id") == req.interaction_id:
+                        entry["feedback"] = req.rating
+                        if req.comment:
+                            entry["feedback_comment"] = req.comment
+                        updated = True
+                    lines.append(json.dumps(entry, ensure_ascii=False))
 
-        if not updated:
-            # Añadir entrada mínima de feedback si no existe la interacción
-            import datetime as _dt
-            lines.append(json.dumps({
-                "id":        req.interaction_id,
-                "timestamp": _dt.datetime.now(_dt.timezone.utc)
-                                .isoformat().replace("+00:00", "Z"),
-                "feedback":  req.rating,
-                "feedback_comment": req.comment,
-            }, ensure_ascii=False))
+            if not updated:
+                # Añadir entrada mínima de feedback si no existe la interacción
+                import datetime as _dt
+                lines.append(json.dumps({
+                    "id":        req.interaction_id,
+                    "timestamp": _dt.datetime.now(_dt.timezone.utc)
+                                    .isoformat().replace("+00:00", "Z"),
+                    "feedback":  req.rating,
+                    "feedback_comment": req.comment,
+                }, ensure_ascii=False))
 
-        with open(log_path, "w", encoding="utf-8") as lf:
-            for line in lines:
-                lf.write(line + "\n")
+            with open(log_path, "w", encoding="utf-8") as lf:
+                for line in lines:
+                    lf.write(line + "\n")
 
         return {"ok": True, "updated": updated, "interaction_id": req.interaction_id}
 

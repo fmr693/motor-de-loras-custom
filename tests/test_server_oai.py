@@ -796,6 +796,30 @@ class TestImageErrors:
         assert ei.value.status_code == 400
         assert ei.value.detail["type"] == "invalid_image"
 
+    def test_log_integro_bajo_appends_y_feedback_concurrentes(self, client):
+        # /feedback reescribe el log ENTERO mientras _log_interaction añade:
+        # sin _LOG_LOCK se perdían interacciones (39/300 medido, ronda 4).
+        # Test con la race real: 3 hilos de appends + 1 de feedbacks.
+        import threading
+
+        N, FB = 150, 15
+        def appender(base):
+            for i in range(N // 3):
+                server._log_interaction(f"race-{base}-{i}", f"q{i}", "a", ms=1)
+
+        def feedbacker():
+            for i in range(FB):   # ids nuevos → cada POST añade 1 línea
+                client.post("/feedback",
+                            json={"interaction_id": f"race-fb-{i}", "rating": 1})
+
+        ths = [threading.Thread(target=appender, args=(b,)) for b in range(3)]
+        ths.append(threading.Thread(target=feedbacker))
+        for t in ths: t.start()
+        for t in ths: t.join()
+
+        rows = _read_log()          # _read_log parsea: línea corrupta → excepción
+        assert len(rows) == N + FB  # ni una interacción perdida
+
     def test_texto_mal_codificado_da_400(self):
         # un surrogate suelto en el content revienta el encode utf-8 de llama-cpp;
         # es entrada malformada del cliente → 400, no 500 (verificado en vivo).
