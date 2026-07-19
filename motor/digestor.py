@@ -1903,6 +1903,22 @@ class DataDigestor:
     # Exportacion universal (G2: Unsloth, LLaMA-Factory, Axolotl)
     # ------------------------------------------------------------------
 
+    def _reject_if_multimodal(self, framework: str) -> None:
+        """Aborta con aviso claro si el dataset es VLM: los conversores a
+        Alpaca/ShareGPT solo representan texto y stringificarían la imagen como
+        basura (ronda 5 de estrés: '✓ exportado' pero con la lista multimodal
+        cruda en el campo instruction → entrenamiento envenenado en silencio)."""
+        n_mm = sum(1 for ex in self._examples if _example_is_multimodal(ex))
+        if n_mm:
+            raise ValueError(
+                f"[DataDigestor] {n_mm}/{len(self._examples)} ejemplos son "
+                f"MULTIMODALES (imagen); el conversor a {framework} solo maneja "
+                f"texto y los corrompería. Los formatos VLM difieren por "
+                f"framework: entrena el dataset VLM directamente con el "
+                f"VLMTrainer del Motor, o conviértelo a mano al esquema "
+                f"multimodal de {framework}."
+            )
+
     def to_unsloth(
         self,
         output_path: Union[str, Path],
@@ -1928,6 +1944,7 @@ class DataDigestor:
         if not self._examples:
             print("[DataDigestor] Nada que exportar.")
             return 0
+        self._reject_if_multimodal("Unsloth/Alpaca")
 
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1996,6 +2013,7 @@ class DataDigestor:
         if not self._examples:
             print("[DataDigestor] Nada que exportar.")
             return 0
+        self._reject_if_multimodal("LLaMA-Factory (ShareGPT)")
 
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -2080,6 +2098,7 @@ class DataDigestor:
         if not self._examples:
             print("[DataDigestor] Nada que exportar.")
             return 0
+        self._reject_if_multimodal("Axolotl (ShareGPT)")
 
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -5043,6 +5062,18 @@ class _SafeFormatDict(dict):
     """Dict para str.format_map: los placeholders ausentes se quedan en ''."""
     def __missing__(self, key):  # noqa: D401
         return ""
+
+
+def _example_is_multimodal(ex: dict) -> bool:
+    """True si el ejemplo lleva contenido multimodal (content como lista con
+    partes de imagen). Los conversores de framework (Alpaca/ShareGPT) solo
+    representan texto; con VLM stringificarían la lista como basura."""
+    if not isinstance(ex, dict):
+        return False
+    for m in ex.get("messages", []):
+        if isinstance(m.get("content"), list):
+            return True
+    return False
 
 
 def _read_manifest_records(

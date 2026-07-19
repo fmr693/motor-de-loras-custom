@@ -1119,6 +1119,16 @@ def _cmd_convert_dataset(args: argparse.Namespace) -> None:
     framework = args.framework.lower()
     name = args.name
 
+    # Los conversores rechazan datasets VLM (solo representan texto) → mostrar
+    # el aviso limpio en vez de un traceback.
+    try:
+        _convert_dispatch(d, framework, name, args)
+    except ValueError as exc:
+        print(f"[ERROR] {exc}")
+        sys.exit(1)
+
+
+def _convert_dispatch(d, framework, name, args):
     if framework == "llamafactory":
         n = d.to_llamafactory(args.output, dataset_name=name)
         print(f"\n✓ {n} ejemplos exportados a {args.output}/")

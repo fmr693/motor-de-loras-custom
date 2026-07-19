@@ -2267,8 +2267,13 @@ def create_app() -> "fastapi.FastAPI":
     except ImportError:
         from fastapi import File, Form
 
+    # `def` (NO async): el handler hace trabajo SÍNCRONO y pesado (pandas, PDF,
+    # posible enriquecimiento). Como `async def` corría en el event loop y
+    # congelaba TODO el serve durante el procesado (medido ronda 5: /health
+    # tardó 2 s en vez de 0,02 s con un CSV de 60k). Como `def`, FastAPI lo
+    # despacha en su threadpool → el resto del serve sigue respondiendo.
     @app.post("/digestor/process")
-    async def digestor_process(
+    def digestor_process(
         file: bytes = File(...),
         task: str = Form(...),
         filename: str = Form(""),

@@ -69,7 +69,11 @@ def quality_check(
     if not isinstance(entry, dict):
         return False, "no_dict"
 
-    user = (entry.get("user_msg") or "").strip()
+    # str() defensivo: un log real acumula user_msg no-string (int, lista) por
+    # clientes que mandan basura; sin esto .strip() lanzaba AttributeError y
+    # tumbaba TODO el filtrado (y con él learn --auto / DPO). "Nunca lanza" es
+    # el contrato — una entrada mal tipada se descarta, no rompe el lote.
+    user = str(entry.get("user_msg") or "").strip()
     assistant_raw = entry.get("assistant")
 
     if not user:

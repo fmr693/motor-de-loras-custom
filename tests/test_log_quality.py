@@ -69,6 +69,13 @@ class TestQualityCheck:
 
     def test_truncado(self):
         assert quality_check(self._e(finish_reason="length"))[1] == "truncado"
+
+    @pytest.mark.parametrize("valor", [123, ["lista"], {"d": 1}, 3.14])
+    def test_user_msg_no_string_no_lanza(self, valor):
+        # un log real acumula user_msg no-string por clientes que mandan basura;
+        # el contrato es "Nunca lanza" (si no, tumba learn --auto / DPO). Ronda 5.
+        ok, motivo = quality_check(self._e(user_msg=valor))   # no debe lanzar
+        assert isinstance(ok, bool) and isinstance(motivo, str)
         # se puede desactivar
         assert quality_check(self._e(finish_reason="length"), reject_truncated=False)[0] is True
 

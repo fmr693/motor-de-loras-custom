@@ -764,3 +764,43 @@ class TestDedupEscala:
         casi["messages"][2]["content"] += " bis"
         d._examples.append(casi)
         assert d.deduplicate(near_dupe_limit=0) >= 1       # 0 = sin tope
+
+
+# ---------------------------------------------------------------------------
+# Ronda 5 de estrés — conversores rechazan datasets VLM (no basura silenciosa)
+# ---------------------------------------------------------------------------
+
+class TestConversoresVLM:
+    def _vlm(self):
+        d = DataDigestor(mode="vlm", auto_enrich=False)
+        d._examples = [{"messages": [
+            {"role": "user", "content": [
+                {"type": "image", "image": "/x/a.png"},
+                {"type": "text", "text": "¿sexista?"}]},
+            {"role": "assistant", "content": "NO"},
+        ]}]
+        return d
+
+    def _texto(self):
+        d = DataDigestor(auto_enrich=False)
+        d._examples = [{"messages": [
+            {"role": "user", "content": "hola"},
+            {"role": "assistant", "content": "respuesta larga y válida aquí"}]}]
+        return d
+
+    def test_unsloth_rechaza_vlm(self, tmp_path):
+        with pytest.raises(ValueError) as e:
+            self._vlm().to_unsloth(tmp_path / "o.json")
+        assert "MULTIMODAL" in str(e.value)
+
+    def test_llamafactory_rechaza_vlm(self, tmp_path):
+        with pytest.raises(ValueError):
+            self._vlm().to_llamafactory(tmp_path / "lf")
+
+    def test_axolotl_rechaza_vlm(self, tmp_path):
+        with pytest.raises(ValueError):
+            self._vlm().to_axolotl(tmp_path / "ax")
+
+    def test_texto_sigue_convirtiendo(self, tmp_path):
+        n = self._texto().to_unsloth(tmp_path / "o.json")
+        assert n == 1                                  # el texto no se rechaza
