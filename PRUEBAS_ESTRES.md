@@ -14,7 +14,7 @@
 > sistema resista la realidad. Un test puede ser teatro: si mockea una cadena o prueba
 > un único caso feliz, pasa en verde mientras el sistema real se rompe.**
 
-Las cuatro rondas confirman lo mismo: **cada vez que apretamos de verdad (E2E, contra el
+Las cinco rondas confirman lo mismo: **cada vez que apretamos de verdad (E2E, contra el
 serve real, con entradas hostiles), aparecen costuras que 600+ tests en verde no veían.**
 No porque los tests estén mal, sino porque prueban lo que *imaginamos* que puede fallar.
 El estrés prueba lo que *de verdad* falla. Y las costuras se vuelven más sutiles ronda a
@@ -66,8 +66,9 @@ Los fallos no son aleatorios; caen en familias. Reconocerlas permite anticiparla
 | **Degradación deshonesta** | anuncia una capacidad que no cumple | `/health vision:true` con mmproj roto | validar antes de anunciar; degradar con aviso |
 | **Ignorar en silencio** | descarta entrada sin avisar | imagen aplanada a texto; PDF→0 ejemplos | 400 explícito o aviso claro; nunca salida muda equivocada |
 | **Envenenar el dato** | mete basura en el log/dataset | base64 en interaction_log; label lista | higiene en la frontera; el dato de entrenamiento es sagrado |
-| **Frágil ante lo malformado** | una entrada mala tumba todo el lote | 1 línea JSON rota aborta el manifiesto | resiliencia por elemento (saltar con reporte) |
+| **Frágil ante lo malformado** | una entrada mala tumba todo el lote | 1 línea JSON rota aborta el manifiesto; user_msg no-string | resiliencia por elemento (saltar con reporte) |
 | **500 por culpa del cliente** | error del usuario disfrazado de fallo del servidor | imagen inválida, contexto desbordado | traducir a 4xx accionable |
+| **Bloqueo del event loop** | `async def` con trabajo síncrono → congela TODO el serve | `/digestor/process` freezaba /health 2 s | endpoints con trabajo pesado = `def` (threadpool) |
 
 ---
 
@@ -197,6 +198,42 @@ perder.* Además, a mitad de ronda **Docker Desktop se cayó** (el `npipe` dejó
 responder); se relanzó y se continuó. Otro recordatorio de la ronda 3: la infraestructura
 de la prueba falla tanto como el sistema.
 
+### Ronda 5 — El camino del dato hacia el ENTRENAMIENTO (3 fallos + validación de rumbo)
+
+Contexto: doble objetivo —solidez e información de rumbo. Se estresó el pipeline completo
+`log → quality → reflexión/DPO → conversores` (lo que desbloquea el primer LoRA real) y
+la superficie HTTP nunca tocada.
+
+**Lo que aguantó / validó (señal de rumbo positiva):**
+- **El camino híbrido feedback→reflexión→DPO FUNCIONA E2E** con el juez Gemma real: sobre
+  una conversación con corrección explícita ("Eso está mal, es 30"), el juez infirió
+  turno 1 = **error** (conf 1.0), turno 2 = **acierto**, y produjo el par DPO
+  `{rejected: "35", chosen: "30"}`. La maquinaria de "aprender del uso" es real.
+- **DPOBuilder** sobre un log hostil (basura inyectada) → 1 par correcto, sin crash.
+- **info** y **convert-dataset** (texto) sobre datos reales → OK. `model=null` → 200.
+
+| # | Costura | Causa raíz | Familia | Fix |
+|---|---|---|---|---|
+| 1 | `log_quality` **lanza** con `user_msg` no-string | `(x or "").strip()` sobre un int/lista | frágil ante lo malformado | `str()` defensivo (contrato "Nunca lanza") |
+| 2 | **conversores corrompen datasets VLM en silencio** | stringifican la lista multimodal como repr de Python | ignorar/envenenar en silencio | `_reject_if_multimodal` aborta con aviso |
+| 3 | `POST /digestor/process` **congela el serve entero** | `async def` con trabajo síncrono pesado en el event loop | bloqueo del event loop | `def` → threadpool de FastAPI |
+
+**Los tres están en el camino al primer entrenamiento**, el objetivo de rumbo del proyecto:
+- El fallo 1 tumbaba `learn --auto` / DPO con un solo dato mal tipado en el log — y el log
+  real ya acumula esa basura (lo metieron los blitzes de la ronda 4). El ciclo nocturno de
+  continual learning habría muerto en silencio.
+- El fallo 2 es doblemente relevante: el **único dataset real medible** que tienes es EXIST
+  (VLM), y es justo el que los conversores corrompían. Si hubieras querido entrenarlo en
+  Unsloth/LLaMA-Factory, habrías entrenado con basura.
+- El fallo 3 es una **familia nueva** (bloqueo del event loop): distinta del crash de
+  thread-safety de la ronda 2. Un `async def` que hace trabajo síncrono no rompe, pero
+  congela TODO el serve durante el procesado — invisible hasta que dos cosas pasan a la vez.
+
+**Lección de la ronda 5:** al estresar el camino del dato encontramos que **estaba minado
+justo donde el proyecto quiere avanzar**. Y una señal de infraestructura que ya es tendencia:
+**Docker Desktop se cayó por SEGUNDA vez** esta sesión (rondas 4 y 5). No es anecdótico —
+es el eslabón frágil del ecosistema soberano en Windows (ver Rumbo).
+
 ---
 
 ## Principios destilados (hasta ahora)
@@ -256,7 +293,7 @@ accionables, y ningún lote (manifiesto, batch) cae entero por un elemento malo.
 - ~~Serve CPU (`:8000`) corre una imagen anterior a varios fixes~~ → **saldado en la
   ronda 4** (reconstruido; overflow → 400, `_LOG_LOCK` incluido).
 
-### Estado del ecosistema tras 4 rondas (17 jul 2026)
+### Estado del ecosistema tras 5 rondas (17 jul 2026)
 
 - **Concurrencia**: inferencia serializada (`_INFER_LOCK`) y log serializado (`_LOG_LOCK`).
   16 hilos mixtos + 4 imágenes concurrentes → 0 crashes.
@@ -269,7 +306,47 @@ accionables, y ningún lote (manifiesto, batch) cae entero por un elemento malo.
 - **Digestor**: resiliente por elemento (manifiesto malformado no cae entero); dedup con
   tope O(n²) avisado; BOM de Excel neutralizado; F4 idéntico al script bespoke sobre
   datos reales.
-- **Deuda restante**: solo el streaming abandonado (caracterizado, bajo impacto).
+- **Camino al entrenamiento**: log_quality resiliente a basura; conversores rechazan VLM
+  con aviso; `/digestor/process` no bloquea el event loop; reflexión→DPO validado E2E.
+- **Deuda restante**: streaming abandonado (diseño) + fragilidad de Docker Desktop en
+  Windows (2 caídas esta sesión). Ver "Rumbo".
+
+## Rumbo del proyecto (lo que las pruebas revelan sobre hacia dónde ir)
+
+Estresar no solo endurece: **muestra dónde está el proyecto de verdad**. Lo que las 5
+rondas dicen sobre el siguiente paso:
+
+1. **El primer entrenamiento real ya está DESBLOQUEADO — y el candidato es EXIST-VLM.**
+   La ronda 5 validó los dos extremos: el camino reflexión→DPO produce señal de
+   entrenamiento correcta (par chosen/rejected), y F4 genera el dataset VLM idéntico al
+   script bespoke. El único dominio **medible** que tienes es EXIST (hay holdout + F1 de
+   referencia del pipeline clásico). Rumbo natural: **entrenar el LoRA VLM sobre EXIST con
+   el VLMTrainer y comparar F1 contra el holdout** — cierra el círculo "fábrica → adapter
+   → métrica" por primera vez de punta a punta. (Ojo: los conversores externos NO sirven
+   para VLM —ronda 5—; se entrena con el VLMTrainer del Motor.)
+
+2. **El feedback implícito ya tiene tubería; falta CAUDAL.** El juez funciona, pero el log
+   real es pequeño y casi todo aciertos. El valor se acumula con el USO: cuanto más se use
+   Gemma vía Odysseus/Hermes, más señal DPO produce la reflexión. Rumbo: **usar el stack a
+   diario** es, literalmente, generar el activo. No hay atajo de ingeniería para esto.
+
+3. **La deuda pendiente es de resiliencia, no de features.** Tras 5 rondas, lo que queda
+   son dos límites conocidos, ambos de diseño: el **streaming abandonado** (ronda 3) y la
+   fragilidad de **Docker Desktop en Windows** (se cayó 2 veces esta sesión). El segundo es
+   el más estratégico: el stack soberano depende de un Docker Desktop que no es fiable.
+   Rumbo posible: evaluar WSL2 + Docker Engine nativo (sin Desktop) o un arranque
+   supervisado, para que la caída de Docker no tumbe el ecosistema entero.
+
+4. **El código está maduro; la superficie ya se sostiene.** Las costuras de la ronda 5 no
+   fueron de lógica de negocio rota, sino de robustez en los bordes (tipos, async,
+   formatos). Eso sugiere que la base es sólida y el trabajo de valor ya no es "arreglar el
+   motor" sino **usarlo para producir el dataset y medir** — que es la tesis original.
+
+**Síntesis de rumbo:** el ecosistema está lo bastante firme para dejar de construir tubería
+y empezar a **bombear dato real** por ella. El siguiente hito con más señal sería el primer
+LoRA medible (EXIST-VLM), y en paralelo, endurecer el eslabón Docker.
+
+---
 
 ### Cómo correr una ronda nueva
 
@@ -280,4 +357,4 @@ accionables, y ningún lote (manifiesto, batch) cae entero por un elemento malo.
 5. Re-verifica el ataque contra el sistema arreglado.
 6. Añade la fila a la tabla de su ronda y, si aparece una familia nueva, a la taxonomía.
 
-*Última actualización: 17 jul 2026 — tras la ronda 4.*
+*Última actualización: 17 jul 2026 — tras la ronda 5.*
