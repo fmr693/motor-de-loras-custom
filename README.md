@@ -158,6 +158,7 @@ motor-de-loras-custom/
 ├── fabrica_loras.py            CLI (14 comandos)
 ├── motor/                      19 módulos (ver tabla)
 ├── tests/                      suites pytest + harnesses E2E en vivo
+├── scripts/                    operación: backup del activo + watchdog de Docker
 ├── presentacion/               presentaciones HTML (defensa, etc.)
 ├── integration_patches/        parches al submódulo Odysseus
 ├── odysseus/                   submódulo (apexEvan/odysseus)
@@ -165,8 +166,14 @@ motor-de-loras-custom/
 ├── docker-compose.yml / docker-compose.unificado.yml
 ├── pyproject.toml
 ├── README.md / SESION.md       documentación pública / memoria de desarrollo
+├── PRUEBAS_ESTRES.md           bitácora de 5 rondas de estrés + rumbo del proyecto
 └── legacy/                     histórico (EXIST 2025, backups)
 ```
+
+> **Operación** (`scripts/`, ver [`scripts/README_scripts.md`](scripts/README_scripts.md)):
+> `backup_activo.py` respalda el dato irreemplazable (log, datasets, memoria) y
+> `docker_watchdog.ps1` relanza Docker Desktop si el engine cae. Ambos como tareas
+> programadas. El activo del proyecto es el **dataset** → protegerlo es parte del diseño.
 
 ---
 

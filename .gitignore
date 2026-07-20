@@ -73,3 +73,5 @@ SESION.backup.md
 legacy/
 presentacion/
 
+logs/*.log
+_backups_motor/
