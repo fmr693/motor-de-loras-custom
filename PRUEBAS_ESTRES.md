@@ -313,6 +313,17 @@ accionables, y ningún lote (manifiesto, batch) cae entero por un elemento malo.
 
 ## Rumbo del proyecto (lo que las pruebas revelan sobre hacia dónde ir)
 
+> **CUMPLIDO (20-21 jul 2026): el punto 1 de abajo se ejecutó y el hito EXIST-VLM está
+> CERRADO.** La fábrica generó el dataset (idéntico byte a byte al bespoke), lo entrenó y el
+> adapter mide **F1-macro 0.7186 en el holdout**, batiendo al bespoke (0.7013) y al pipeline
+> clásico (0.7038). Siete entrenamientos acotaron además el techo: un anotador humano
+> individual saca 0.7578 contra ese gold, y el 45,7 % de los memes no tiene consenso humano
+> → el límite es del DATO, no del modelo. Detalle completo en `SESION.md`.
+>
+> Y confirmó la tesis de esta bitácora desde otro ángulo: **la disciplina de medición vale
+> tanto como la de estrés**. El "run B" daba +0.03 en validación y −0.02 en holdout; mirar
+> solo validación habría documentado una mejora inexistente.
+
 Estresar no solo endurece: **muestra dónde está el proyecto de verdad**. Lo que las 5
 rondas dicen sobre el siguiente paso:
 

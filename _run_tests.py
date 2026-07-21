@@ -38,6 +38,8 @@ DEV_TESTS = [
     "tests/test_log_quality.py",     # filtro de calidad del interaction_log
     "tests/test_reflection.py",      # pase de reflexión (feedback implícito) + fusión DPO
     "tests/test_digestor_distill.py", # Digestor: modos + destilación markdown (higiene)
+    "tests/test_agent_robustness.py", # agente: guards de shell, entradas hostiles
+    "tests/test_exporter.py",         # ExportManager (GGUF vía importorskip llama_cpp)
 ]
 
 # Tests que requieren torch/peft/GPU (worker container, Python 3.11 + CUDA)
@@ -49,6 +51,8 @@ WORKER_TESTS = [
     "tests/test_digestor_completo.py",  # digestor con datasets reales
     "tests/test_vlm_pipeline.py",    # pipeline VLM (requiere torch+vision)
     "tests/test_gemma4_support.py",  # gemma4_unified: analyzer + trainer (usa torch.nn)
+    "tests/test_vlm_mask_prompt.py", # collator VLM: completion-only loss (usa torch)
+    "tests/test_vlm_keep_best.py",   # VLMTrainer: guarda la mejor época, no la última
 ]
 
 PYTEST_FLAGS = [
@@ -79,6 +83,28 @@ def _run(test_files: list[str], label: str) -> int:
     return result.returncode
 
 
+def _warn_unlisted() -> list[str]:
+    """
+    Avisa de ficheros test_*.py presentes en tests/ que no están en ningún
+    manifiesto. Sin esto, un test nuevo queda huérfano y `--all` lo ignora en
+    silencio (pasó con test_agent_robustness.py y test_exporter.py: 108 tests
+    que el runner no corría, aunque el CI —pytest tests/— sí).
+    """
+    listed   = {Path(t).name for t in DEV_TESTS + WORKER_TESTS}
+    on_disk  = {p.name for p in (ROOT / "tests").glob("test_*.py")}
+    unlisted = sorted(on_disk - listed)
+
+    if unlisted:
+        print("\n" + "!" * 70)
+        print("AVISO: ficheros de test NO listados en DEV_TESTS ni WORKER_TESTS.")
+        print("Este runner NO los ejecuta. Añádelos al manifiesto que corresponda:")
+        for u in unlisted:
+            print(f"    tests/{u}")
+        print("!" * 70)
+
+    return unlisted
+
+
 def _list_tests():
     print("\nTests por entorno:")
     print("\n  [DEV / cualquier máquina — sin GPU]")
@@ -93,6 +119,8 @@ def _list_tests():
 
 def main():
     args = sys.argv[1:]
+
+    _warn_unlisted()
 
     if "--list" in args:
         _list_tests()

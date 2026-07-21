@@ -5,7 +5,7 @@
 > sobre cualquier modelo open-source, y lo sirve de principio a fin. **Sin nube. 0 €/consulta. 100% privado.**
 
 **Origen:** pipeline EXIST 2025 (detección de sexismo en memes) generalizado a una fábrica reutilizable.
-**Estado:** 645 tests · 0 fallos · 15 comandos CLI · Docker (CPU y GPU) · modelo base actual **Gemma 4 12B** a ~50 tok/s en RTX 4080 · contexto configurable hasta 64K (caché KV cuantizable) · RAG verificado · **visión** (imágenes vía mmproj, perfil multimodal) · aprendizaje híbrido (feedback humano + reflexión) · Digestor multi-modo (clasificar/destilar/conocimiento/VLM) con router `--mode auto` en el CLI · compatible con frontends agénticos (Odysseus y Hermes).
+**Estado:** 665 tests · 0 fallos · 15 comandos CLI · Docker (CPU y GPU) · modelo base actual **Gemma 4 12B** a ~50 tok/s en RTX 4080 · contexto configurable hasta 64K (caché KV cuantizable) · RAG verificado · **visión** (imágenes vía mmproj, perfil multimodal) · aprendizaje híbrido (feedback humano + reflexión) · Digestor multi-modo (clasificar/destilar/conocimiento/VLM) con router `--mode auto` en el CLI · compatible con frontends agénticos (Odysseus y Hermes).
 
 ---
 
@@ -142,7 +142,7 @@ El servidor expone una API estilo OpenAI, así que **cualquier frontend compatib
 
 ## Tests
 
-645 tests · 0 fallos · tres capas (unitaria, integración E2E, comportamiento).
+665 tests · 0 fallos · tres capas (unitaria, integración E2E, comportamiento).
 
 ```bash
 PYTHONUTF8=1 python -m pytest tests/ -q       # suite completa
@@ -179,15 +179,17 @@ motor-de-loras-custom/
 
 ## Origen académico — EXIST 2025 (el círculo cerrado)
 
-El Motor nació del pipeline [EXIST 2025](https://github.com/fmr693/EXIST-2025) (detección multimodal de sexismo en memes, shared task de CLEF 2025) — y en julio de 2026 volvió a él como **primer caso de estudio medible**: el `VLMTrainer` afinó Qwen2-VL-2B (LoRA r=16, bf16, 3 épocas, **52 min en una RTX 4080 con 6 GB de VRAM**) y se comparó con el pipeline clásico original en el **mismo holdout del 15%** que ningún modelo vio entrenando:
+El Motor nació del pipeline [EXIST 2025](https://github.com/fmr693/EXIST-2025) (detección multimodal de sexismo en memes, shared task de CLEF 2025) — y en julio de 2026 volvió a él como **primer caso de estudio medible**, esta vez de punta a punta: el **Digestor** generó el dataset (`digestor --mode vlm --manifest`) y el **VLMTrainer** afinó Qwen2-VL-2B (LoRA r=16, bf16, ~50 min en una RTX 4080 con 6 GB de VRAM). Comparación en el **mismo holdout del 15%** que ningún modelo vio entrenando:
 
 | Sistema (mismo holdout, 607 memes) | F1 macro | F1 YES |
 |---|---|---|
 | Pipeline clásico (XLM-RoBERTa + ResNet50, ensemble de 6 modelos) | 0.61 | 0.74 |
 | Qwen2-VL-2B zero-shot (umbral calibrado) | 0.62 | 0.73 |
-| **Qwen2-VL-2B + adapter LoRA del Motor (~50 MB)** | **0.70** | **0.79** |
+| Qwen2-VL-2B + adapter LoRA del Motor (~50 MB) | 0.70 | 0.79 |
+| **ídem, con `mask_prompt` + `keep_best`** | **0.72** | **0.83** |
+| *referencia: un anotador humano individual* | *0.76* | — |
 
-Un solo modelo de 2B con un adapter del Motor supera al ensemble completo: **+8,7 puntos de F1 macro**. Protocolo, scripts y detalles en el [repo EXIST-2025](https://github.com/fmr693/EXIST-2025).
+Un solo modelo de 2B con un adapter del Motor supera al ensemble completo. La segunda fila del Motor añade dos mejoras del `VLMTrainer` (pérdida solo sobre la respuesta y quedarse con la mejor época) y deja el adapter **a ~4 centésimas del rendimiento de un anotador humano medio** — el techo real de una tarea donde el 45,7 % de los memes ni siquiera tiene consenso entre anotadores. Protocolo, scripts y detalles en el [repo EXIST-2025](https://github.com/fmr693/EXIST-2025).
 
 ---
 

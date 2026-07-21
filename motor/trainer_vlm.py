@@ -70,6 +70,62 @@ def _supports_bf16() -> bool:
     return _get_compute_capability()[0] >= 8
 
 
+def _args_seleccion_checkpoint(
+    keep_best: bool,
+    eval_ds,
+    eval_every_steps: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Política de evaluación y guardado: cuándo se mide y con qué punto se queda.
+
+    El Trainer ya evaluaba cada época (`eval_strategy="epoch"`), pero con
+    `save_strategy="no"` y sin `load_best_model_at_end` tiraba esa medición y
+    guardaba siempre la final — aunque su propia evaluación dijera que era la
+    peor. Medido en EXIST-VLM: se guardó un adapter de eval_loss 0.2652
+    habiendo pasado por 0.1658 en la primera época.
+
+    `eval_every_steps` sube la RESOLUCIÓN de esa elección. Evaluando por época
+    solo se puede elegir el punto 1.0, 2.0, 3.0…; si el óptimo cae en medio
+    (en EXIST-VLM la eval_loss subía ya entre la época 1 y la 2), se pierde.
+    Evaluar cada N pasos permite quedarse con el mínimo real de la MISMA
+    trayectoria, sin alargar el entrenamiento ni tocar el planificador de LR.
+
+    Elegir la mejor exige una métrica que comparar: sin dataset de evaluación
+    no se puede, y se avisa en vez de fingir que sí.
+    """
+    por_pasos = eval_every_steps is not None and eval_every_steps > 0
+    ritmo = (
+        {"eval_strategy": "steps", "eval_steps": eval_every_steps}
+        if por_pasos
+        else {"eval_strategy": "epoch"}
+    )
+
+    puede_elegir = bool(keep_best) and eval_ds is not None and len(eval_ds) > 0
+
+    if not puede_elegir:
+        if keep_best:
+            print("[VLMTrainer] AVISO: sin dataset de evaluación no se puede elegir "
+                  "el mejor punto; se guardará el último.")
+        return {**ritmo, "save_strategy": "no"}
+
+    # save_strategy DEBE casar con eval_strategy o transformers rechaza
+    # load_best_model_at_end.
+    guardado = (
+        {"save_strategy": "steps", "save_steps": eval_every_steps}
+        if por_pasos
+        else {"save_strategy": "epoch"}
+    )
+
+    return {
+        **ritmo,
+        **guardado,
+        "load_best_model_at_end": True,
+        "metric_for_best_model":  "eval_loss",
+        "greater_is_better":      False,
+        "save_total_limit":       1,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Data Collator multimodal
 # ---------------------------------------------------------------------------
@@ -81,12 +137,16 @@ class _VLMDataCollator:
     Convierte cada ejemplo {"messages": [...]} en tensores listos para Trainer.
     Maneja imágenes como PIL.Image cargadas desde rutas en disco.
 
-    Labels: copia de input_ids con -100 en posiciones de padding.
+    Labels: copia de input_ids con -100 en posiciones de padding. Con
+    mask_prompt=True, además se enmascara el prompt entero (completion-only
+    loss): el gradiente viene solo de la respuesta del assistant.
     """
 
-    def __init__(self, processor, max_seq_length: int = 1024):
+    def __init__(self, processor, max_seq_length: int = 1024, mask_prompt: bool = False):
         self.processor      = processor
         self.max_seq_length = max_seq_length
+        self.mask_prompt    = mask_prompt
+        self._mask_warned   = False
 
     # --- extrae imágenes PIL de los mensajes ---
     def _extract_images(self, messages: list) -> list:
@@ -130,6 +190,40 @@ class _VLMDataCollator:
                 parts.append(f"<|{role}|>\n{content}")
             return "\n".join(parts) + tok.eos_token
 
+    # --- nº de tokens que ocupa el prompt (todo menos la respuesta final) ---
+    def _prompt_token_len(self, messages: list, image) -> Optional[int]:
+        """
+        Longitud en tokens del prompt: los mensajes SIN el turno final del
+        assistant, con add_generation_prompt=True.
+
+        Se procesa CON LA MISMA IMAGEN a propósito: los VLM tipo Qwen2-VL
+        expanden el placeholder de imagen a N tokens según su resolución, así
+        que contar sin ella daría un corte desplazado y enmascararía parte de
+        la respuesta (o dejaría prompt sin enmascarar).
+
+        Devuelve None si no se puede determinar (se omite el enmascarado).
+        """
+        prompt_msgs = list(messages)
+        if prompt_msgs and prompt_msgs[-1].get("role") == "assistant":
+            prompt_msgs = prompt_msgs[:-1]
+        if not prompt_msgs:
+            return None
+
+        try:
+            text = self.processor.apply_chat_template(
+                prompt_msgs,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            if image is not None:
+                enc = self.processor(text=[text], images=[image], return_tensors="pt")
+            else:
+                tok = getattr(self.processor, "tokenizer", self.processor)
+                enc = tok([text], return_tensors="pt")
+            return int(enc["input_ids"].shape[1])
+        except Exception:
+            return None
+
     def __call__(self, examples: list) -> dict:
         from PIL import Image as PILImage
 
@@ -172,6 +266,48 @@ class _VLMDataCollator:
         pad_id = tok.pad_token_id
         if pad_id is not None:
             labels[labels == pad_id] = -100
+
+        # Completion-only loss (opcional): además, -100 en TODO el prompt, de
+        # modo que el gradiente venga solo de la respuesta del assistant.
+        # Sin esto, la pérdida cubre prompt + tokens de imagen + respuesta; en
+        # tareas con respuesta corta (p.ej. una etiqueta YES/NO frente a un
+        # prompt de cientos de tokens) la señal útil queda diluida.
+        if self.mask_prompt:
+            imgs_for_len = flat_images if has_images else [None] * len(examples)
+            pad_left     = getattr(tok, "padding_side", "right") == "left"
+            total_len    = labels.shape[1]
+
+            for i, ex in enumerate(examples):
+                n_prompt = self._prompt_token_len(ex["messages"], imgs_for_len[i])
+                if n_prompt is None:
+                    continue
+
+                if pad_left and pad_id is not None:
+                    # Padding a la izquierda (lo que usa Qwen2-VL): el relleno es
+                    # un PREFIJO. Se cuentan los pads de cabecera, no los pads
+                    # totales: si el modelo reutiliza el token de pad como eos,
+                    # contar todos los pads metería el eos final en la cuenta y
+                    # desplazaría el corte sobre la respuesta.
+                    no_pad = (batch["input_ids"][i] != pad_id).nonzero().flatten()
+                    n_lead_pad = int(no_pad[0]) if len(no_pad) else total_len
+                    cut = n_lead_pad + n_prompt
+                else:
+                    cut = n_prompt
+                cut = min(cut, total_len)
+
+                # Si la truncación se comió la respuesta, enmascarar dejaría el
+                # ejemplo entero a -100 → loss NaN. Mejor dejarlo sin enmascarar.
+                if cut >= total_len or bool((labels[i, cut:] == -100).all()):
+                    if not self._mask_warned:
+                        print("[VLMTrainer] AVISO: algún ejemplo se queda sin tokens "
+                              "de respuesta al enmascarar el prompt (¿max_seq_length "
+                              "demasiado corto?). Esos ejemplos se entrenan SIN "
+                              "enmascarar para no romper la pérdida.")
+                        self._mask_warned = True
+                    continue
+
+                labels[i, :cut] = -100
+
         batch["labels"] = labels
 
         return batch
@@ -206,6 +342,12 @@ class VLMTrainer:
         Máx. tokens. Las imágenes consumen muchos tokens; default 1024.
     cache_dir : str, opcional
         Caché HuggingFace para los pesos.
+    mask_prompt : bool
+        Completion-only loss: si True, el prompt se enmascara (-100) y el
+        gradiente viene SOLO de la respuesta del assistant. Por defecto False
+        (comportamiento histórico: la pérdida cubre toda la secuencia).
+        Actívalo cuando la respuesta sea corta frente al prompt —p. ej. una
+        etiqueta de clasificación—, donde si no la señal queda diluida.
     """
 
     # Módulos de atención + MLP del backbone LLM (comunes a Qwen2-VL, LLaVA, InternVL…)
@@ -224,6 +366,7 @@ class VLMTrainer:
         load_in_4bit: bool = True,
         max_seq_length: int = 1024,
         cache_dir: Optional[str] = None,
+        mask_prompt: bool = False,
     ):
         if not torch.cuda.is_available():
             raise RuntimeError(
@@ -239,6 +382,7 @@ class VLMTrainer:
         self.load_in_4bit   = load_in_4bit
         self.max_seq_length = max_seq_length
         self.cache_dir      = cache_dir
+        self.mask_prompt    = mask_prompt
 
         self._use_bf16 = _supports_bf16()
 
@@ -272,6 +416,8 @@ class VLMTrainer:
         warmup_steps: int = 10,
         eval_split: float = 0.1,
         logging_steps: int = 10,
+        keep_best: bool = True,
+        eval_every_steps: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Entrena el adapter LoRA VLM y lo guarda en output_dir.
@@ -297,6 +443,17 @@ class VLMTrainer:
             Fracción para validación. Por defecto 0.1.
         logging_steps : int
             Frecuencia de log. Por defecto 10.
+        keep_best : bool
+            Guardar la MEJOR época según eval_loss en vez de la última. Por
+            defecto True. El Trainer ya evaluaba cada época; sin esto tiraba
+            la medición y guardaba la final aunque fuese la peor. Necesita
+            dataset de evaluación (si no lo hay, avisa y guarda la última).
+        eval_every_steps : int, opcional
+            Evaluar (y poder guardar) cada N pasos en vez de cada época. Sube la
+            RESOLUCIÓN de `keep_best`: por época solo se puede elegir el punto
+            1.0, 2.0, 3.0…; si el óptimo cae en medio, se pierde. No alarga el
+            entrenamiento ni toca el planificador de LR — solo mide más a menudo
+            (cada evaluación cuesta una pasada por el split de eval).
 
         Devuelve
         --------
@@ -321,11 +478,16 @@ class VLMTrainer:
         collator = _VLMDataCollator(
             processor      = processor,
             max_seq_length = self.max_seq_length,
+            mask_prompt    = self.mask_prompt,
         )
 
         print(f"\n[VLMTrainer] Iniciando entrenamiento VLM...")
         print(f"  Épocas: {epochs}  |  Batch efectivo: {batch_size * grad_accum}")
         print(f"  LR: {learning_rate}  |  max_seq_length: {self.max_seq_length}")
+        print(f"  Pérdida: {'solo respuesta (prompt enmascarado)' if self.mask_prompt else 'secuencia completa'}")
+        _ritmo = f"cada {eval_every_steps} pasos" if eval_every_steps else "cada época"
+        print(f"  Evaluación: {_ritmo}")
+        print(f"  Se guarda: {'el MEJOR punto (por eval_loss)' if keep_best else 'el último'}")
 
         t0 = time.time()
         trainer = self._build_trainer(
@@ -340,10 +502,19 @@ class VLMTrainer:
             learning_rate = learning_rate,
             warmup_steps  = warmup_steps,
             logging_steps = logging_steps,
+            keep_best     = keep_best,
+            eval_every_steps = eval_every_steps,
         )
 
         train_result = trainer.train()
         elapsed = time.time() - t0
+
+        # Con keep_best, el modelo en memoria ya es el de la mejor época: el
+        # evaluate() de abajo mide ESE, no el de la última.
+        mejor = getattr(trainer.state, "best_metric", None)
+        if mejor is not None:
+            print(f"[VLMTrainer] Mejor época por eval_loss: {round(mejor, 4)} "
+                  f"(es la que se guarda)")
 
         print("\n[VLMTrainer] Evaluando...")
         eval_result = trainer.evaluate()
@@ -364,6 +535,11 @@ class VLMTrainer:
             "batch_effective": batch_size * grad_accum,
             "train_loss":      round(train_result.training_loss, 4),
             "eval_loss":       round(eval_result.get("eval_loss", 0.0), 4),
+            "keep_best":       bool(keep_best),
+            "best_eval_loss":  round(mejor, 4) if mejor is not None else None,
+            "best_checkpoint": getattr(trainer.state, "best_model_checkpoint", None),
+            "eval_every_steps": eval_every_steps,
+            "mask_prompt":     bool(self.mask_prompt),
             "train_samples":   len(train_ds),
             "eval_samples":    len(eval_ds),
             "elapsed_min":     round(elapsed / 60, 2),
@@ -507,6 +683,8 @@ class VLMTrainer:
         learning_rate: float,
         warmup_steps: int,
         logging_steps: int,
+        keep_best: bool = True,
+        eval_every_steps: Optional[int] = None,
     ):
         from transformers import Trainer, TrainingArguments, TrainerCallback
 
@@ -561,8 +739,11 @@ class VLMTrainer:
                 print(f"[Progreso] Completado en {int(elapsed // 60)}m {int(elapsed % 60)}s")
                 sys.stdout.flush()
 
+        seleccion = _args_seleccion_checkpoint(keep_best, eval_ds, eval_every_steps)
+
         training_args = TrainingArguments(
             output_dir                  = output_dir,
+            **seleccion,
             num_train_epochs            = epochs,
             per_device_train_batch_size = batch_size,
             per_device_eval_batch_size  = batch_size,
@@ -575,8 +756,6 @@ class VLMTrainer:
             fp16                        = False,
             bf16                        = self._use_bf16,
             logging_steps               = logging_steps,
-            eval_strategy               = "epoch",
-            save_strategy               = "no",
             report_to                   = "none",
             seed                        = 42,
             disable_tqdm                = True,
