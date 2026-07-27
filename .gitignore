@@ -74,4 +74,5 @@ legacy/
 presentacion/
 
 logs/*.log
+logs/watchdog.pausa
 _backups_motor/
