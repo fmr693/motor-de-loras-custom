@@ -368,4 +368,4 @@ LoRA medible (EXIST-VLM), y en paralelo, endurecer el eslabón Docker.
 5. Re-verifica el ataque contra el sistema arreglado.
 6. Añade la fila a la tabla de su ronda y, si aparece una familia nueva, a la taxonomía.
 
-*Última actualización: 17 jul 2026 — tras la ronda 5.*
+*Última actualización: 21 jul 2026 — 5 rondas de estrés + nota de cumplimiento del hito EXIST-VLM.*
