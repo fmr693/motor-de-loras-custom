@@ -33,14 +33,37 @@ LATENCIA_TOKEN = 0.01     # 10 ms/token ~ velocidad real de un 12B en GPU
 PUERTO = 8899
 CORTE_TRAS = 5            # chunks que lee el cliente antes de irse
 
+# Escenario tools: el camino con herramientas es no-stream POR DENTRO (los
+# argumentos de una tool call solo sirven completos), así que el modelo tarda
+# todo esto ANTES de emitir el primer chunk. El cliente se va a mitad.
+LATENCIA_TOOLS = 2.0
+CORTE_TOOLS = 0.5
+
 
 class LlamaLento:
     """Modelo falso que cuenta los chunks realmente producidos."""
 
     def __init__(self):
         self.producidos = 0
+        self.inferencias_tools = 0
 
     def create_chat_completion(self, messages, stream=False, **kw):
+        if kw.get("tools"):
+            # Inferencia lenta y COMPLETA antes del primer chunk.
+            self.inferencias_tools += 1
+            time.sleep(LATENCIA_TOOLS)
+            return {
+                "choices": [{
+                    "message": {"role": "assistant", "content": None,
+                                "tool_calls": [{
+                                    "id": "call_1", "type": "function",
+                                    "function": {"name": "file_organize",
+                                                 "arguments": '{"path": "~/Descargas"}'},
+                                }]},
+                    "finish_reason": "tool_calls",
+                }],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28},
+            }
         if not stream:
             return {
                 "choices": [{"message": {"role": "assistant", "content": "ok"},
@@ -203,13 +226,59 @@ def main() -> int:
         print(f"[FALLO] Serialización rota (solape={solapes['max']}, errores={errores}): "
               "con llama-cpp real esto sería un segfault.")
 
+    # --- EL DATO NO SE TIRA: tools + cliente que abandona --------------------
+    # El camino con herramientas es no-stream por dentro: cuando se emite el
+    # primer chunk, el modelo YA hizo todo el trabajo. Si el cliente se fue
+    # mientras generaba, Starlette abandona el generador en ese primer yield y
+    # todo lo que haya DESPUÉS del último yield no corre jamás (ni un `finally`:
+    # dependería de que el GC cerrase el generador). Ahí se perdía una
+    # interacción ya generada — y las de herramientas son las que más valen
+    # para el activo. Regla 11: el log es el activo.
+    print("\nComprobando que una interacción con tools no se pierde al abandonar...")
+    log_path = Path(st.interaction_log_path)
+
+    def _lineas_log():
+        if not log_path.exists():
+            return 0
+        return len([l for l in log_path.read_text(encoding="utf-8").splitlines() if l.strip()])
+
+    antes = _lineas_log()
+    inferencias_antes = modelo.inferencias_tools
+    payload_tools = {
+        "model": "gemma",
+        "messages": [{"role": "user", "content": "organiza mis descargas"}],
+        "stream": True,
+        "tools": [{"type": "function",
+                   "function": {"name": "file_organize", "description": "organiza",
+                                "parameters": {"type": "object"}}}],
+    }
+    try:
+        with httpx.Client(timeout=httpx.Timeout(30, read=CORTE_TOOLS)) as c:
+            with c.stream("POST", f"http://127.0.0.1:{PUERTO}/v1/chat/completions",
+                          json=payload_tools) as r:
+                for _ in r.iter_lines():
+                    pass
+    except httpx.ReadTimeout:
+        pass          # el cliente ABANDONA mientras el modelo genera
+
+    time.sleep(LATENCIA_TOOLS + 1.5)     # dejar terminar la inferencia en curso
+    inferencias = modelo.inferencias_tools - inferencias_antes
+    nuevas = _lineas_log() - antes
+    print(f"  cliente cortó a los {CORTE_TOOLS}s | inferencias del modelo: "
+          f"{inferencias} | interacciones nuevas en el log: {nuevas}")
+    if inferencias >= 1 and nuevas >= 1:
+        print("[OK] La interacción abandonada quedó en el log: el dato no se tira.")
+    else:
+        ok = False
+        print(f"[FALLO] El modelo generó {inferencias} respuesta(s) y el log ganó "
+              f"{nuevas}: se PIERDE dato de entrenamiento ya producido.")
+
     servidor.should_exit = True
     hilo.join(timeout=5)
 
-    log = Path(st.interaction_log_path)
-    if log.exists():
-        print(f"Log de la interacción abandonada: {len(log.read_text(encoding='utf-8').splitlines())} línea(s)")
-        log.unlink()
+    if log_path.exists():
+        print(f"Log total del arnés: {_lineas_log()} línea(s)")
+        log_path.unlink()
 
     return 0 if ok else 1
 

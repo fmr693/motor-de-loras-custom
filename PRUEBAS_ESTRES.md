@@ -70,6 +70,7 @@ Los fallos no son aleatorios; caen en familias. Reconocerlas permite anticiparla
 | **500 por culpa del cliente** | error del usuario disfrazado de fallo del servidor | imagen inválida, contexto desbordado | traducir a 4xx accionable |
 | **Bloqueo del event loop** | `async def` con trabajo síncrono → congela TODO el serve | `/digestor/process` freezaba /health 2 s | endpoints con trabajo pesado = `def` (threadpool) |
 | **Primitivo con afinidad de thread** | se adquiere en un thread y se libera en otro → excepción silenciada y recurso **bloqueado para siempre** | `_INFER_LOCK` (RLock) tomado por un worker y cerrado por el GC en otro thread | si el ciclo de vida cruza threads (generadores, callbacks, GC), usar un primitivo **sin dueño** (`Semaphore`) |
+| **Epílogo que nunca corre** | el código tras el último `yield` de un generador de streaming se pierde si el consumidor abandona | `_log_interaction` del camino tools: inferencia completa, 0 líneas de log | lo que hay que persistir va **antes del primer yield** (o en un `finally` cerrado de forma determinista), nunca después del último |
 
 ---
 
@@ -315,6 +316,17 @@ accionables, y ningún lote (manifiesto, batch) cae entero por un elemento malo.
   midió la ronda 3 con 8 streams simultáneos no se ha vuelto a reproducir en ese escenario
   exacto; lo verificado ahora es 1 stream cortado + 8 peticiones concurrentes serializando
   correctamente. Ver `SESION.md` (28 jul) y `tests/e2e_stream_cancel_live.py`.
+  - **Hallazgo derivado (mismo día, tirando del hilo):** auditando si el OTRO generador de
+    streaming —el camino con **tools**— tenía el mismo lock huérfano, resultó que no (ahí el
+    lock se toma y suelta antes del primer chunk), pero tenía un fallo distinto: su
+    `_log_interaction` estaba **después del último `yield`**. Ese camino es no-stream por
+    dentro, así que cuando el cliente abandona durante la inferencia el modelo YA ha hecho
+    todo el trabajo, y el generador se abandona en el primer yield sin llegar nunca al log.
+    Medido contra uvicorn real: **1 inferencia completa, 0 líneas de log**. Y son las
+    interacciones **agénticas** —las de más valor para el activo— las que se tiraban. Fix:
+    loguear **antes del primer yield** (el dato ya está completo ahí, y corre en el
+    threadpool, no en el event loop). Un `finally` NO habría bastado: sin nadie que cierre
+    el generador, dependería del GC. Familia nueva en la taxonomía: *epílogo que nunca corre*.
 - ~~Serve CPU (`:8000`) corre una imagen anterior a varios fixes~~ → **saldado en la
   ronda 4** (reconstruido; overflow → 400, `_LOG_LOCK` incluido).
 
@@ -395,5 +407,6 @@ LoRA medible (EXIST-VLM), y en paralelo, endurecer el eslabón Docker.
 5. Re-verifica el ataque contra el sistema arreglado.
 6. Añade la fila a la tabla de su ronda y, si aparece una familia nueva, a la taxonomía.
 
-*Última actualización: 28 jul 2026 — 5 rondas de estrés, hito EXIST-VLM cumplido y corrección
-del diagnóstico de la ronda 3 (streaming abandonado).*
+*Última actualización: 28 jul 2026 — 5 rondas de estrés, hito EXIST-VLM cumplido, corrección
+del diagnóstico de la ronda 3 (streaming abandonado) y el hallazgo derivado en el camino de
+tools (interacción agéntica perdida al abandonar el stream).*

@@ -7,7 +7,7 @@
 **Resultado que lo demuestra:** partiendo de datos crudos, la fábrica produjo un adapter de 50 MB sobre un modelo de 2B que **supera en 11 puntos de F1 a un ensemble de 6 modelos** en el mismo holdout intocado, y queda a 4 centésimas de un anotador humano ([detalle y metodología](#resultados-medibles)).
 
 **Origen:** pipeline EXIST 2025 (detección de sexismo en memes) generalizado a una fábrica reutilizable.
-**Estado:** 673 tests · 0 fallos · 15 comandos CLI · Docker (CPU y GPU) · modelo base actual **Gemma 4 12B** a ~50 tok/s en RTX 4080 · contexto configurable hasta 64K (caché KV cuantizable) · RAG verificado · **visión** (imágenes vía mmproj, perfil multimodal) · aprendizaje híbrido (feedback humano + reflexión) · Digestor multi-modo (clasificar/destilar/conocimiento/VLM) con router `--mode auto` en el CLI · compatible con frontends agénticos (Odysseus y Hermes).
+**Estado:** 674 tests · 0 fallos · 15 comandos CLI · Docker (CPU y GPU) · modelo base actual **Gemma 4 12B** a ~50 tok/s en RTX 4080 · contexto configurable hasta 64K (caché KV cuantizable) · RAG verificado · **visión** (imágenes vía mmproj, perfil multimodal) · aprendizaje híbrido (feedback humano + reflexión) · Digestor multi-modo (clasificar/destilar/conocimiento/VLM) con router `--mode auto` en el CLI · compatible con frontends agénticos (Odysseus y Hermes).
 
 ---
 
@@ -47,13 +47,13 @@ Las dos últimas filas se separan por dos mejoras del `VLMTrainer` desarrolladas
 
 ## Madurez: qué está verificado (y qué no)
 
-El proyecto no se valida solo con tests unitarios: se somete a **rondas de estrés contra hardware real** (ver [`PRUEBAS_ESTRES.md`](PRUEBAS_ESTRES.md), bitácora de 5 rondas y 9 familias de fallo).
+El proyecto no se valida solo con tests unitarios: se somete a **rondas de estrés contra hardware real** (ver [`PRUEBAS_ESTRES.md`](PRUEBAS_ESTRES.md), bitácora de 5 rondas y 10 familias de fallo).
 
 | Área | Estado verificado |
 |---|---|
 | **Concurrencia** | Inferencia y log serializados. 16 hilos mixtos + 4 imágenes concurrentes → 0 caídas. *Antes del fix, 2 peticiones simultáneas tumbaban el servidor.* |
 | **Entradas malformadas** | JSON/tipos → 422; imagen inválida, texto mal codificado, contexto desbordado → **400 accionables**, no 500 opacos. Verificado bajo carga. |
-| **Integridad del dato** | Log íntegro con escrituras concurrentes (0 pérdidas). *Antes del fix se perdían 39 de 300 interacciones.* Nunca entra base64 al log. |
+| **Integridad del dato** | Log íntegro con escrituras concurrentes (0 pérdidas). *Antes del fix se perdían 39 de 300 interacciones.* Nunca entra base64 al log. Una interacción con herramientas queda registrada aunque el cliente abandone el *streaming*: si el modelo hizo el trabajo, el dato se guarda. |
 | **Ciclo completo** | Dato → dataset → adapter → **métrica en holdout intocado**, cerrado de punta a punta sobre un caso real (ver Resultados). |
 | **Resiliencia por lote** | Un elemento corrupto no tumba el lote: manifiesto con líneas rotas, PDF ilegible o librería ausente degradan **con aviso**, nunca en silencio. |
 | **Streaming abandonado** | Un cliente que corta deja de consumir GPU (3 de 300 chunks) y el servicio sigue atendiendo. *Antes del fix, el lock de inferencia quedaba huérfano y podía colgar el servidor.* |
@@ -183,7 +183,7 @@ El servidor expone una API estilo OpenAI, así que **cualquier frontend compatib
 
 ## Tests
 
-673 tests · 0 fallos · tres capas (unitaria, integración E2E, comportamiento).
+674 tests · 0 fallos · tres capas (unitaria, integración E2E, comportamiento).
 
 ```bash
 PYTHONUTF8=1 python -m pytest tests/ -q       # suite completa

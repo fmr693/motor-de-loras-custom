@@ -1914,6 +1914,29 @@ def create_app() -> "fastapi.FastAPI":
                     except Exception as e:
                         yield f"data: {_json.dumps({'error': str(e)})}\n\n"
                         return
+
+                    # Loguear AQUÍ, antes del primer yield, no después del
+                    # último. Este camino es no-stream por dentro: la inferencia
+                    # entera ocurre en el primer next(), así que en este punto ya
+                    # se sabe todo lo que se loguea. Si el cliente se fue
+                    # mientras el modelo trabajaba, Starlette abandona el
+                    # generador en el primer yield y el código posterior NO corre
+                    # nunca — ni siquiera un `finally`, que dependería de que el
+                    # GC cerrase el generador (ni cuándo ni en qué thread; es el
+                    # mismo mecanismo que dejaba huérfano a _INFER_LOCK). Medido
+                    # contra uvicorn real: inferencia completa y 0 líneas de log.
+                    # Se tiraba una interacción YA generada, y precisamente las
+                    # de herramientas, que son las que más valen para el activo.
+                    # Aquí, además, corre en el threadpool (Regla 21), no en el
+                    # event loop. Regla 11: el log es el activo.
+                    _log_interaction(
+                        chat_id, user_msg, text,
+                        ms=int((time.time() - t0) * 1000),
+                        endpoint="v1/chat/completions",
+                        extra={"finish_reason": finish,
+                               **({"tool_calls": tool_calls} if tool_calls else {})},
+                    )
+
                     delta: dict = {"role": "assistant"}
                     if text:
                         delta["content"] = text
@@ -1930,13 +1953,6 @@ def create_app() -> "fastapi.FastAPI":
                             "choices": [{"index": 0, "delta": d, "finish_reason": f}],
                         }) + "\n\n"
                     yield "data: [DONE]\n\n"
-                    _log_interaction(
-                        chat_id, user_msg, text,
-                        ms=int((time.time() - t0) * 1000),
-                        endpoint="v1/chat/completions",
-                        extra={"finish_reason": finish,
-                               **({"tool_calls": tool_calls} if tool_calls else {})},
-                    )
                 return StreamingResponse(_generate_tools(), media_type="text/event-stream")
 
             # Señal de "el cliente se fue": la marca el envoltorio async y la

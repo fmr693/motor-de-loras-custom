@@ -328,6 +328,51 @@ class TestToolCalling:
         assert e["finish_reason"] == "tool_calls"
         assert e["tool_calls"][0]["id"] == "call_abc123"
 
+    def test_log_no_depende_de_que_el_cliente_agote_el_stream(self, client):
+        """
+        Un cliente agéntico que abandona el stream de tools NO puede costar la
+        interacción: el camino tools es no-stream por dentro (el modelo hace
+        TODO el trabajo en el primer next()), así que el dato ya existe cuando
+        se emite el primer chunk. Antes, `_log_interaction` estaba DESPUÉS del
+        último yield: si el cliente se iba mientras el modelo generaba,
+        Starlette abandonaba el generador en el primer yield y la interacción
+        se tiraba — medido contra uvicorn real: inferencia completa, 0 líneas
+        de log. Y son las interacciones con herramientas las que más valen
+        para el activo (Regla 11).
+
+        Se ataca el generador directamente porque `TestClient` NO sirve: agota
+        siempre la respuesta, así que un test hecho con él pasaría en verde sin
+        probar nada (Regla 27). Aquí se consume UN chunk y se abandona, que es
+        exactamente lo que hace un cliente que se va.
+        """
+        endpoint = next(r.endpoint for r in client.app.routes
+                        if getattr(r, "path", None) == "/v1/chat/completions")
+
+        class RequestFalso:            # el camino tools no lo usa; solo la firma
+            async def is_disconnected(self):
+                return False
+
+        req = server._OAIRequest(
+            messages=[server._OAIMessage(role="user", content="organiza mis descargas")],
+            tools=TOOLS,
+            stream=True,
+        )
+        resp = endpoint(req, RequestFalso())
+
+        # Un solo chunk y nos vamos: el generador queda SIN agotar.
+        # (Starlette envuelve el generador síncrono en uno async, de ahí el
+        # __anext__ suelto en vez de un `for`.)
+        import asyncio
+        primero = asyncio.run(resp.body_iterator.__anext__())
+        assert primero.startswith("data: ")
+
+        entradas = _read_log()
+        assert len(entradas) == 1, (
+            "la interacción se perdió al abandonar el stream de tools: el "
+            "modelo ya había hecho el trabajo completo"
+        )
+        assert entradas[0]["tool_calls"][0]["id"] == "call_abc123"
+
     def test_log_no_stream_incluye_tool_calls(self, client):
         client.post("/v1/chat/completions", json={
             "messages": [{"role": "user", "content": "organiza mis descargas"}],
