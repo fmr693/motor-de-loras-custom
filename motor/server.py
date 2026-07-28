@@ -51,6 +51,17 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# `Request` a nivel de MÓDULO a propósito: este fichero usa
+# `from __future__ import annotations`, así que las anotaciones de los endpoints
+# son cadenas que FastAPI resuelve contra el namespace del módulo. Importarlo
+# solo dentro de create_app() dejaba `request: Request` sin resolver y la
+# petición se rechazaba con 422. El resto de imports de fastapi siguen siendo
+# perezosos (es una dependencia opcional: el Digestor funciona sin ella).
+try:  # pragma: no cover - depende del entorno
+    from fastapi import Request
+except ImportError:  # pragma: no cover
+    Request = Any  # type: ignore[assignment,misc]
+
 
 # ---------------------------------------------------------------------------
 # Estado global del servidor (cargado una vez al arrancar)
@@ -102,10 +113,66 @@ _state = _ServerState()
 # endpoint, coincidir era cuestión de tiempo.
 #
 # La GPU procesa una petición cada vez de todas formas, así que serializar no
-# cuesta rendimiento real: convierte un CRASH en una COLA. Es RLock por si algún
-# camino llegara a anidar llamadas. En streaming se mantiene tomado durante todo
-# el generador (si el cliente corta, GeneratorExit lo libera igual).
-_INFER_LOCK = threading.RLock()
+# cuesta rendimiento real: convierte un CRASH en una COLA.
+#
+# Semaphore(1), NO RLock. Un RLock solo puede liberarlo el thread que lo tomó, y
+# en streaming eso se rompe: el generador toma el lock en un worker thread y,
+# cuando el cliente abandona, quien lo cierra es el recolector de basura DESDE
+# OTRO THREAD -> "RuntimeError: cannot release un-acquired lock" y el lock queda
+# TOMADO PARA SIEMPRE. El serve parecía sobrevivir solo porque RLock es
+# reentrante: si la siguiente petición caía en el mismo worker, podía
+# readquirirlo; si caía en otro, se colgaba indefinidamente. Medido en
+# tests/e2e_stream_cancel_live.py.
+#
+# Un Semaphore no tiene dueño: lo libera cualquier thread, que es justo lo que
+# el cierre de un generador necesita. No se pierde nada: los tres usos con
+# `with` envuelven una única llamada al modelo y NO anidan, así que la
+# reentrancia del RLock nunca se usaba.
+_INFER_LOCK = threading.Semaphore(1)
+
+
+async def _stream_vigilando_desconexion(gen, request, cancelado: threading.Event):
+    """
+    Envuelve un generador de streaming SÍNCRONO y corta la generación cuando el
+    cliente desconecta.
+
+    Starlette ya cancela el task group cuando el cliente desconecta, así que la
+    generación se detenía sola; lo que NO estaba garantizado era la liberación
+    de `_INFER_LOCK` (ver el comentario de `_INFER_LOCK`, ahora Semaphore).
+    Este envoltorio hace explícita la cancelación en vez de confiar en el
+    comportamiento interno de Starlette, y deja el corte medible en tests.
+
+    El generador pesado sigue siendo síncrono y corriendo en el threadpool
+    (Regla 21: trabajo pesado NUNCA en el event loop); aquí solo se hace la
+    comprobación barata de desconexión entre chunk y chunk. Al detectarla se
+    marca `cancelado`, que el bucle de generación consulta para salir por su
+    `finally` — liberando el lock y logueando lo ya producido.
+
+    No se puede matar el thread a media generación: se corta en el siguiente
+    chunk, que es la primera oportunidad segura.
+    """
+    from starlette.concurrency import iterate_in_threadpool
+
+    try:
+        async for chunk in iterate_in_threadpool(gen):
+            if await request.is_disconnected():
+                cancelado.set()
+                break
+            yield chunk
+    finally:
+        # Cubre el camino de excepción/cancelación del task group de Starlette:
+        # si salimos por cualquier motivo, el productor debe parar.
+        cancelado.set()
+        # Cerrar el generador de forma DETERMINISTA. Al romper el `async for`
+        # queda suspendido, y su `finally` —el que libera `_INFER_LOCK` y
+        # loguea lo producido— correría solo cuando el GC lo recogiese, que no
+        # está garantizado ni en el momento ni en el thread. Ahora es seguro
+        # hacerlo desde aquí porque `_INFER_LOCK` es un Semaphore (sin dueño);
+        # con el RLock anterior, esto mismo reventaba.
+        try:
+            gen.close()
+        except Exception:  # nunca romper la respuesta por el cierre
+            pass
 
 # El log canónico (Regla 11) tiene DOS escritores: _log_interaction (append por
 # petición) y POST /feedback (read-modify-REWRITE del fichero entero). Sin lock,
@@ -927,7 +994,7 @@ def create_app() -> "fastapi.FastAPI":
         )
 
     try:
-        from fastapi import FastAPI, HTTPException, Depends, Header
+        from fastapi import FastAPI, HTTPException, Depends, Header, Request
         from fastapi.middleware.cors import CORSMiddleware
     except ImportError:
         raise ImportError(
@@ -1695,9 +1762,13 @@ def create_app() -> "fastapi.FastAPI":
     # ----------------------------------------------------------------
 
     @app.post("/v1/chat/completions", response_model=_OAIResponse, dependencies=[Depends(_check_api_key)])
-    def chat_completions_openai(req: _OAIRequest):
+    def chat_completions_openai(req: _OAIRequest, request: Request):
         """
         Chat completions en formato OpenAI-compatible.
+
+        `request` se inyecta solo para detectar la desconexión del cliente en
+        streaming (ver `_stream_vigilando_desconexion`); el endpoint sigue
+        siendo `def` para que FastAPI lo despache al threadpool (Regla 21).
         """
         import json as _json
         # max_tokens ausente o <=0 → default generoso (semántica OpenAI:
@@ -1868,6 +1939,10 @@ def create_app() -> "fastapi.FastAPI":
                     )
                 return StreamingResponse(_generate_tools(), media_type="text/event-stream")
 
+            # Señal de "el cliente se fue": la marca el envoltorio async y la
+            # consulta el bucle de generación (que corre en el threadpool).
+            cancelado = threading.Event()
+
             def _generate():
                 model_name = str(Path(_state.model_path).name)
                 created = int(time.time())
@@ -1907,6 +1982,12 @@ def create_app() -> "fastapi.FastAPI":
                         stream=True,
                     )
                     for chunk in stream:
+                        # El cliente se fue: dejar de pedir tokens al modelo.
+                        # Sin esto el serve drenaba la respuesta entera para
+                        # nadie, reteniendo _INFER_LOCK y encolando al resto.
+                        if cancelado.is_set():
+                            finish_seen = finish_seen or "disconnect"
+                            break
                         choices = chunk.get("choices", [])
                         if not choices:
                             continue
@@ -1956,7 +2037,10 @@ def create_app() -> "fastapi.FastAPI":
                                    if finish_seen else {"finish_reason": "disconnect"}),
                         )
 
-            return StreamingResponse(_generate(), media_type="text/event-stream")
+            return StreamingResponse(
+                _stream_vigilando_desconexion(_generate(), request, cancelado),
+                media_type="text/event-stream",
+            )
 
         # ── Modo normal (no-streaming) ────────────────────────────────
         tool_calls = None

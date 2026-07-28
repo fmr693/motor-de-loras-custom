@@ -69,6 +69,7 @@ Los fallos no son aleatorios; caen en familias. Reconocerlas permite anticiparla
 | **Frágil ante lo malformado** | una entrada mala tumba todo el lote | 1 línea JSON rota aborta el manifiesto; user_msg no-string | resiliencia por elemento (saltar con reporte) |
 | **500 por culpa del cliente** | error del usuario disfrazado de fallo del servidor | imagen inválida, contexto desbordado | traducir a 4xx accionable |
 | **Bloqueo del event loop** | `async def` con trabajo síncrono → congela TODO el serve | `/digestor/process` freezaba /health 2 s | endpoints con trabajo pesado = `def` (threadpool) |
+| **Primitivo con afinidad de thread** | se adquiere en un thread y se libera en otro → excepción silenciada y recurso **bloqueado para siempre** | `_INFER_LOCK` (RLock) tomado por un worker y cerrado por el GC en otro thread | si el ciclo de vida cruza threads (generadores, callbacks, GC), usar un primitivo **sin dueño** (`Semaphore`) |
 
 ---
 
@@ -149,6 +150,21 @@ escritura al socket falla, y el buffer TCP la retrasa. Fix real = detección de
 desconexión asíncrona, que choca con el modelo síncrono + lock → **diferido como cambio
 de diseño propio**, no parcheado a las prisas en una sesión de estrés (sería irónico
 introducir un bug nuevo arreglando esto).
+
+> **CORRECCIÓN (28 jul 2026) — este diagnóstico era INCOMPLETO y en parte erróneo.** Al
+> atacarlo con instrumentación se midió lo contrario: contra uvicorn real, un cliente que
+> corta deja el modelo en **3 de 300 chunks**, porque Starlette ya cancela el task group al
+> desconectar. La generación **sí** se detenía. Lo que estaba roto era peor y pasó
+> desapercibido: `_INFER_LOCK` era un `RLock` —solo liberable por su thread dueño— y el
+> generador abandonado lo cerraba el **GC desde otro thread**, así que el `release()` fallaba
+> (`cannot release un-acquired lock`, silenciado por Python) y **el lock quedaba TOMADO**. El
+> serve parecía recuperarse sólo porque RLock es reentrante y la siguiente petición podía caer
+> en el mismo worker; en otro, se habría colgado. Es decir: lo que aquí se anotó como *"no es
+> un crash, se recupera solo"* era en realidad un **bug de disponibilidad latente**.
+> Fix: `Semaphore(1)` + cierre determinista del generador. Ver `SESION.md` (28 jul).
+> *Nota:* el backlog de ~90 s con 8 streams simultáneos que se midió aquí no se ha reproducido
+> en ese escenario exacto tras el arreglo; lo verificado ahora es 1 stream cortado + 8
+> peticiones concurrentes serializando bien.
 
 **Lección de la ronda 3 (sobre el propio proceso):** al fuzzear el Digestor, mi harness
 usó `level="auto"` por defecto, detectó el serve real como alcanzable y se puso a
@@ -288,8 +304,17 @@ accionables, y ningún lote (manifiesto, batch) cae entero por un elemento malo.
 
 ### Pendiente conocido (deuda documentada, no oculta)
 
-- **Streaming abandonado** no cancela la generación server-side (ronda 3). Impacto real
-  bajo para 1-2 usuarios; fix = detección de desconexión asíncrona (cambio de diseño).
+- ~~**Streaming abandonado** no cancela la generación server-side (ronda 3)~~ → **CERRADO
+  el 28 jul, y el diagnóstico de la ronda 3 era INCOMPLETO.** Medido contra uvicorn real:
+  un cliente que corta deja el modelo en **3 de 300 chunks** (Starlette ya cancela el task
+  group), así que la generación *sí* se detenía. Lo que estaba roto era otra cosa y peor:
+  `_INFER_LOCK` era un `RLock` y **quedaba huérfano** al cerrarse el generador desde el
+  thread del GC (`cannot release un-acquired lock`, silenciado) → el serve podía **colgarse
+  indefinidamente** según en qué worker cayera la siguiente petición. Fix: `Semaphore(1)`
+  (sin dueño) + cierre determinista del generador. *Matiz honesto:* el backlog de ~90 s que
+  midió la ronda 3 con 8 streams simultáneos no se ha vuelto a reproducir en ese escenario
+  exacto; lo verificado ahora es 1 stream cortado + 8 peticiones concurrentes serializando
+  correctamente. Ver `SESION.md` (28 jul) y `tests/e2e_stream_cancel_live.py`.
 - ~~Serve CPU (`:8000`) corre una imagen anterior a varios fixes~~ → **saldado en la
   ronda 4** (reconstruido; overflow → 400, `_LOG_LOCK` incluido).
 
@@ -308,8 +333,9 @@ accionables, y ningún lote (manifiesto, batch) cae entero por un elemento malo.
   datos reales.
 - **Camino al entrenamiento**: log_quality resiliente a basura; conversores rechazan VLM
   con aviso; `/digestor/process` no bloquea el event loop; reflexión→DPO validado E2E.
-- **Deuda restante**: streaming abandonado (diseño) + fragilidad de Docker Desktop en
-  Windows (2 caídas esta sesión). Ver "Rumbo".
+- **Deuda restante**: ~~streaming abandonado~~ (**cerrado el 28 jul** — y resultó ser un lock
+  huérfano, no un límite de diseño; ver la corrección en la ronda 3) + fragilidad de Docker
+  Desktop en Windows (2 caídas esta sesión). Ver "Rumbo".
 
 ## Rumbo del proyecto (lo que las pruebas revelan sobre hacia dónde ir)
 
@@ -342,7 +368,8 @@ rondas dicen sobre el siguiente paso:
    diario** es, literalmente, generar el activo. No hay atajo de ingeniería para esto.
 
 3. **La deuda pendiente es de resiliencia, no de features.** Tras 5 rondas, lo que queda
-   son dos límites conocidos, ambos de diseño: el **streaming abandonado** (ronda 3) y la
+   son dos límites conocidos, ambos de diseño: el **streaming abandonado** (ronda 3 —
+   **cerrado el 28 jul; no era de diseño sino un lock huérfano**, ver la corrección) y la
    fragilidad de **Docker Desktop en Windows** (se cayó 2 veces esta sesión). El segundo es
    el más estratégico: el stack soberano depende de un Docker Desktop que no es fiable.
    Rumbo posible: evaluar WSL2 + Docker Engine nativo (sin Desktop) o un arranque
@@ -368,4 +395,5 @@ LoRA medible (EXIST-VLM), y en paralelo, endurecer el eslabón Docker.
 5. Re-verifica el ataque contra el sistema arreglado.
 6. Añade la fila a la tabla de su ronda y, si aparece una familia nueva, a la taxonomía.
 
-*Última actualización: 21 jul 2026 — 5 rondas de estrés + nota de cumplimiento del hito EXIST-VLM.*
+*Última actualización: 28 jul 2026 — 5 rondas de estrés, hito EXIST-VLM cumplido y corrección
+del diagnóstico de la ronda 3 (streaming abandonado).*

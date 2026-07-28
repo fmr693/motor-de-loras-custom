@@ -7,7 +7,7 @@
 **Resultado que lo demuestra:** partiendo de datos crudos, la fábrica produjo un adapter de 50 MB sobre un modelo de 2B que **supera en 11 puntos de F1 a un ensemble de 6 modelos** en el mismo holdout intocado, y queda a 4 centésimas de un anotador humano ([detalle y metodología](#resultados-medibles)).
 
 **Origen:** pipeline EXIST 2025 (detección de sexismo en memes) generalizado a una fábrica reutilizable.
-**Estado:** 665 tests · 0 fallos · 15 comandos CLI · Docker (CPU y GPU) · modelo base actual **Gemma 4 12B** a ~50 tok/s en RTX 4080 · contexto configurable hasta 64K (caché KV cuantizable) · RAG verificado · **visión** (imágenes vía mmproj, perfil multimodal) · aprendizaje híbrido (feedback humano + reflexión) · Digestor multi-modo (clasificar/destilar/conocimiento/VLM) con router `--mode auto` en el CLI · compatible con frontends agénticos (Odysseus y Hermes).
+**Estado:** 673 tests · 0 fallos · 15 comandos CLI · Docker (CPU y GPU) · modelo base actual **Gemma 4 12B** a ~50 tok/s en RTX 4080 · contexto configurable hasta 64K (caché KV cuantizable) · RAG verificado · **visión** (imágenes vía mmproj, perfil multimodal) · aprendizaje híbrido (feedback humano + reflexión) · Digestor multi-modo (clasificar/destilar/conocimiento/VLM) con router `--mode auto` en el CLI · compatible con frontends agénticos (Odysseus y Hermes).
 
 ---
 
@@ -47,7 +47,7 @@ Las dos últimas filas se separan por dos mejoras del `VLMTrainer` desarrolladas
 
 ## Madurez: qué está verificado (y qué no)
 
-El proyecto no se valida solo con tests unitarios: se somete a **rondas de estrés contra hardware real** (ver [`PRUEBAS_ESTRES.md`](PRUEBAS_ESTRES.md), bitácora de 5 rondas y 7 familias de fallo).
+El proyecto no se valida solo con tests unitarios: se somete a **rondas de estrés contra hardware real** (ver [`PRUEBAS_ESTRES.md`](PRUEBAS_ESTRES.md), bitácora de 5 rondas y 9 familias de fallo).
 
 | Área | Estado verificado |
 |---|---|
@@ -56,9 +56,9 @@ El proyecto no se valida solo con tests unitarios: se somete a **rondas de estr�
 | **Integridad del dato** | Log íntegro con escrituras concurrentes (0 pérdidas). *Antes del fix se perdían 39 de 300 interacciones.* Nunca entra base64 al log. |
 | **Ciclo completo** | Dato → dataset → adapter → **métrica en holdout intocado**, cerrado de punta a punta sobre un caso real (ver Resultados). |
 | **Resiliencia por lote** | Un elemento corrupto no tumba el lote: manifiesto con líneas rotas, PDF ilegible o librería ausente degradan **con aviso**, nunca en silencio. |
+| **Streaming abandonado** | Un cliente que corta deja de consumir GPU (3 de 300 chunks) y el servicio sigue atendiendo. *Antes del fix, el lock de inferencia quedaba huérfano y podía colgar el servidor.* |
 
 **Límites conocidos, documentados y no ocultos:**
-- Un cliente que corta un *streaming* a mitad no cancela la generación en servidor (retiene el turno; el servicio no cae). Fix = detección asíncrona de desconexión, pendiente.
 - Docker Desktop en Windows es el eslabón frágil del stack (2 caídas en una sesión de pruebas). Mitigado con un watchdog; la solución de fondo (WSL2 + Docker Engine nativo) está en el roadmap.
 - Visión y contexto de 64K son **alternos**, no simultáneos: no caben a la vez en 16 GB de VRAM.
 
@@ -183,7 +183,7 @@ El servidor expone una API estilo OpenAI, así que **cualquier frontend compatib
 
 ## Tests
 
-665 tests · 0 fallos · tres capas (unitaria, integración E2E, comportamiento).
+673 tests · 0 fallos · tres capas (unitaria, integración E2E, comportamiento).
 
 ```bash
 PYTHONUTF8=1 python -m pytest tests/ -q       # suite completa
@@ -224,7 +224,7 @@ motor-de-loras-custom/
 
 1. **Régimen de uso — acumular el activo.** El uso diario deja señal de entrenamiento en el log. Medible en seco con `python scripts/chequeo_activo.py`. Umbral fijado de antemano: ~1-2k ejemplos SFT limpios o ~300-500 pares de preferencia → primer entrenamiento de comportamiento. *Línea base (jul 2026): 87 ejemplos SFT limpios.*
 2. **Endurecer el despliegue.** Evaluar WSL2 + Docker Engine nativo para eliminar la dependencia de Docker Desktop, en vez de vigilarla.
-3. **Deuda técnica conocida:** cancelación de *streaming* abandonado (cambio de diseño, no urgente).
+3. ~~**Deuda técnica conocida:** cancelación de *streaming* abandonado~~ → **cerrada (jul 2026)**. Al medirla resultó estar mal descrita: la generación sí se cancelaba, y lo que fallaba era el lock de inferencia, que quedaba huérfano al cerrarse el generador desde otro hilo. No queda deuda de resiliencia conocida.
 
 ---
 

@@ -40,6 +40,7 @@ DEV_TESTS = [
     "tests/test_digestor_distill.py", # Digestor: modos + destilación markdown (higiene)
     "tests/test_agent_robustness.py", # agente: guards de shell, entradas hostiles
     "tests/test_exporter.py",         # ExportManager (GGUF vía importorskip llama_cpp)
+    "tests/test_stream_cancel.py",    # cancelación de streaming abandonado
 ]
 
 # Tests que requieren torch/peft/GPU (worker container, Python 3.11 + CUDA)
