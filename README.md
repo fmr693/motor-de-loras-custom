@@ -128,8 +128,8 @@ fabrica_loras info       dataset.jsonl
 ## Instalación
 
 ```bash
-git clone https://github.com/fmr693/motor-de-loras-custom.git
-cd motor-de-loras-custom
+git clone https://github.com/fmr693/lora-factory.git
+cd lora-factory
 pip install -e .                 # base (digestor + utilidades)
 pip install -e .[serve]          # + servidor (FastAPI, llama-cpp)
 pip install -e .[train]          # + entrenamiento (torch, peft, trl)
@@ -198,7 +198,7 @@ python _run_tests.py --dev                     # solo lo que no necesita GPU
 ## Estructura del repositorio
 
 ```
-motor-de-loras-custom/
+lora-factory/
 ├── fabrica_loras.py            CLI (15 comandos)
 ├── motor/                      20 módulos (ver tabla)
 ├── tests/                      suites pytest + harnesses E2E en vivo

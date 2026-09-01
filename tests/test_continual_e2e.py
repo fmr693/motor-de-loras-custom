@@ -35,8 +35,21 @@ from unittest.mock import MagicMock, patch
 
 # Workaround WinError 6714: pyarrow escanea sys.path y explota en Windows.
 # Pre-importar pyarrow/sklearn antes de que el repo entre en sys.path.
+# La raiz se deriva de __file__ a proposito: filtrar por el nombre de la carpeta
+# dejaba de funcionar en silencio en cuanto el repo se renombraba o se clonaba
+# con otro nombre, y el crash de pyarrow volvia sin aviso.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _is_repo_path(entry: str) -> bool:
+    try:
+        return Path(entry or ".").resolve() == _REPO_ROOT
+    except (OSError, ValueError):
+        return False
+
+
 _orig_path = list(sys.path)
-sys.path = [p for p in sys.path if "motor-de-loras-custom" not in p]
+sys.path = [p for p in sys.path if not _is_repo_path(p)]
 try:
     import pyarrow
 except ImportError:
