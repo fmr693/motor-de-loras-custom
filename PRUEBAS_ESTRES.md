@@ -3,8 +3,8 @@
 > Este documento no es un informe de resultados: es la **bitácora del aprendizaje**
 > que emerge al someter el proyecto a estrés real contra hardware (RTX 4080), en vez
 > de solo a la suite de tests. Registra el patrón que se repite, la anatomía de cada
-> hallazgo y los principios que van destilándose. Complementa a `SESION.md` (hitos) y
-> al README (qué es y cómo se usa).
+> hallazgo y los principios que van destilándose. Complementa al README (qué es y
+> cómo se usa); la bitácora de hitos del día a día es interna y no se publica.
 
 ---
 
@@ -162,7 +162,7 @@ introducir un bug nuevo arreglando esto).
 > serve parecía recuperarse sólo porque RLock es reentrante y la siguiente petición podía caer
 > en el mismo worker; en otro, se habría colgado. Es decir: lo que aquí se anotó como *"no es
 > un crash, se recupera solo"* era en realidad un **bug de disponibilidad latente**.
-> Fix: `Semaphore(1)` + cierre determinista del generador. Ver `SESION.md` (28 jul).
+> Fix: `Semaphore(1)` + cierre determinista del generador.
 > *Nota:* el backlog de ~90 s con 8 streams simultáneos que se midió aquí no se ha reproducido
 > en ese escenario exacto tras el arreglo; lo verificado ahora es 1 stream cortado + 8
 > peticiones concurrentes serializando bien.
@@ -255,7 +255,7 @@ es el eslabón frágil del ecosistema soberano en Windows (ver Rumbo).
 
 ## Principios destilados (hasta ahora)
 
-Reglas que estas pruebas han convertido en Reglas de oro del proyecto (ver `SESION.md`):
+Reglas que estas pruebas han convertido en Reglas de oro del proyecto:
 
 1. **No acoples un fix a una cadena de error de terceros** sin una lista de marcadores y
    un test con los mensajes reales observados. Los mensajes cambian; el fix no debe morir
@@ -315,7 +315,7 @@ accionables, y ningún lote (manifiesto, batch) cae entero por un elemento malo.
   (sin dueño) + cierre determinista del generador. *Matiz honesto:* el backlog de ~90 s que
   midió la ronda 3 con 8 streams simultáneos no se ha vuelto a reproducir en ese escenario
   exacto; lo verificado ahora es 1 stream cortado + 8 peticiones concurrentes serializando
-  correctamente. Ver `SESION.md` (28 jul) y `tests/e2e_stream_cancel_live.py`.
+  correctamente. Ver `tests/e2e_stream_cancel_live.py`.
   - **Hallazgo derivado (mismo día, tirando del hilo):** auditando si el OTRO generador de
     streaming —el camino con **tools**— tenía el mismo lock huérfano, resultó que no (ahí el
     lock se toma y suelta antes del primer chunk), pero tenía un fallo distinto: su
@@ -356,7 +356,7 @@ accionables, y ningún lote (manifiesto, batch) cae entero por un elemento malo.
 > adapter mide **F1-macro 0.7186 en el holdout**, batiendo al bespoke (0.7013) y al pipeline
 > clásico (0.7038). Siete entrenamientos acotaron además el techo: un anotador humano
 > individual saca 0.7578 contra ese gold, y el 45,7 % de los memes no tiene consenso humano
-> → el límite es del DATO, no del modelo. Detalle completo en `SESION.md`.
+> → el límite es del DATO, no del modelo.
 >
 > Y confirmó la tesis de esta bitácora desde otro ángulo: **la disciplina de medición vale
 > tanto como la de estrés**. El "run B" daba +0.03 en validación y −0.02 en holdout; mirar
