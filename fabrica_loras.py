@@ -2067,7 +2067,7 @@ def _cmd_cycle(args: argparse.Namespace) -> None:
 
 def _cmd_odysseus(args: argparse.Namespace) -> None:
     """
-    Puente de integración entre Motor de LoRAs y Odysseus.
+    Puente de integración entre LoRA Factory y Odysseus.
 
     Uso:
         python fabrica_loras.py odysseus

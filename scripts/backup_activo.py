@@ -89,7 +89,7 @@ def _prune(dest_root: Path, keep: int) -> None:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Backup del activo (dato) del Motor de LoRAs.")
+    ap = argparse.ArgumentParser(description="Backup del activo (dato) de LoRA Factory.")
     default_dest = os.environ.get("MOTOR_BACKUP_DIR", str(ROOT.parent / "_backups_motor"))
     ap.add_argument("--dest", default=default_dest,
                     help=f"Carpeta destino de los backups (def: {default_dest}).")
@@ -106,7 +106,7 @@ def main() -> int:
     dst = dest_root / f"backup_{stamp}"
     dst.mkdir(parents=True, exist_ok=True)
 
-    print(f"[backup] Motor de LoRAs - activo -> {dst}")
+    print(f"[backup] LoRA Factory - activo -> {dst}")
     total = 0
 
     # Log canónico + rotados
@@ -136,7 +136,7 @@ def main() -> int:
 
     # Manifiesto del backup
     (dst / "MANIFEST.txt").write_text(
-        f"Backup del Motor de LoRAs\n"
+        f"Backup de LoRA Factory\n"
         f"Fecha: {dt.datetime.now().isoformat()}\n"
         f"Origen: {ROOT}\n"
         f"Tamano total: {_human(total)}\n"

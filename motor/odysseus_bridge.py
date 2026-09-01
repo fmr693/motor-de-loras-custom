@@ -1,7 +1,7 @@
 """
 motor.odysseus_bridge
 =====================
-Puente bidireccional entre Motor de LoRAs y Odysseus.
+Puente bidireccional entre LoRA Factory y Odysseus.
 
 Proporciona tres capas de integración:
 
@@ -521,7 +521,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Puente Motor de LoRAs ↔ Odysseus",
+        description="Puente LoRA Factory ↔ Odysseus",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(

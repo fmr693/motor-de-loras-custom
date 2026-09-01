@@ -1,7 +1,7 @@
 """
 motor
 =====
-Motor de LoRAs multimodal — interfaz pública del paquete.
+LoRA Factory multimodal — interfaz pública del paquete.
 
 Los módulos que dependen de torch/transformers se importan de forma
 lazy para que DataDigestor pueda usarse sin GPU ni torch instalado.

@@ -1,4 +1,4 @@
-# Motor de LoRAs
+# LoRA Factory
 
 > Una fábrica para especializar y desplegar inteligencia artificial en local.
 > Convierte cualquier dato (CSV, PDF, imágenes, conversaciones) en un adapter LoRA
@@ -13,7 +13,7 @@
 
 ## Qué hace
 
-El Motor cubre el ciclo completo de vida de un modelo especializado, sin que el usuario necesite saber de machine learning:
+La Fábrica cubre el ciclo completo de vida de un modelo especializado, sin que el usuario necesite saber de machine learning:
 
 ```
 datos crudos → DataDigestor → dataset JSONL → ModelAnalyzer → LLMTrainer
@@ -27,13 +27,13 @@ No es un entrenador que necesita otro programa para los datos, ni un servidor qu
 
 ## Resultados medibles
 
-El Motor nació del pipeline [EXIST 2025](https://github.com/fmr693/EXIST-2025) (detección multimodal de sexismo en memes, shared task de CLEF 2025) — y volvió a él como **caso de estudio medible de punta a punta**: el **Digestor** generó el dataset (`digestor --mode vlm --manifest`, salida verificada **idéntica byte a byte** al script artesanal que sustituye) y el **VLMTrainer** afinó Qwen2-VL-2B (LoRA r=16, bf16, ~50 min en una RTX 4080 con 6 GB de VRAM). Comparación en el **mismo holdout del 15 %** que ningún modelo vio entrenando:
+La Fábrica nació del pipeline [EXIST 2025](https://github.com/fmr693/EXIST-2025) (detección multimodal de sexismo en memes, shared task de CLEF 2025) — y volvió a él como **caso de estudio medible de punta a punta**: el **Digestor** generó el dataset (`digestor --mode vlm --manifest`, salida verificada **idéntica byte a byte** al script artesanal que sustituye) y el **VLMTrainer** afinó Qwen2-VL-2B (LoRA r=16, bf16, ~50 min en una RTX 4080 con 6 GB de VRAM). Comparación en el **mismo holdout del 15 %** que ningún modelo vio entrenando:
 
 | Sistema (mismo holdout, 607 memes) | F1 macro | F1 YES |
 |---|---|---|
 | Pipeline clásico (XLM-RoBERTa + ResNet50, ensemble de 6 modelos) | 0.61 | 0.74 |
 | Qwen2-VL-2B zero-shot (umbral calibrado) | 0.62 | 0.73 |
-| Qwen2-VL-2B + adapter LoRA del Motor (~50 MB) | 0.70 | 0.79 |
+| Qwen2-VL-2B + adapter LoRA de la Fábrica (~50 MB) | 0.70 | 0.79 |
 | **ídem, con `mask_prompt` + `keep_best`** | **0.72** | **0.83** |
 | *referencia: un anotador humano individual* | *0.76* | — |
 
@@ -66,7 +66,7 @@ El proyecto no se valida solo con tests unitarios: se somete a **rondas de estr�
 
 ## El modelo: agnóstico por diseño
 
-El Motor funciona con cualquier modelo de HuggingFace (Qwen, Llama, Mistral, Phi, Gemma…). Cambiar de modelo es una línea de configuración. El despliegue actual usa **Gemma 4 12B-it** (Apache 2.0, multimodal, fuerte en español y tool-calling nativo), servido en GGUF Q4_K_M (~7,7 GB) sobre GPU.
+La Fábrica funciona con cualquier modelo de HuggingFace (Qwen, Llama, Mistral, Phi, Gemma…). Cambiar de modelo es una línea de configuración. El despliegue actual usa **Gemma 4 12B-it** (Apache 2.0, multimodal, fuerte en español y tool-calling nativo), servido en GGUF Q4_K_M (~7,7 GB) sobre GPU.
 
 > El conocimiento acumulado vive en el **dataset**, no en el adapter. Cuando salga un modelo mejor, se reentrena con los mismos datos: el activo perdura.
 
@@ -172,7 +172,7 @@ docker compose -f docker-compose.unificado.yml --profile train up motor-worker
 
 ## Frontends agénticos
 
-El servidor expone una API estilo OpenAI, así que **cualquier frontend compatible** puede usar el Motor como cerebro local. Verificados en vivo dos, complementarios:
+El servidor expone una API estilo OpenAI, así que **cualquier frontend compatible** puede usar la Fábrica como cerebro local. Verificados en vivo dos, complementarios:
 
 - **[Odysseus](https://github.com/apexEvan/odysseus)** — workspace de IA en el navegador (chat, agentes, RAG de documentos, búsqueda web). Aporta la interfaz de "oficina". Tool-calling agéntico y RAG con embeddings locales verificados (nada sale del equipo). Sus parches (reaplicables, candidatos a PR upstream) están en [`integration_patches/`](integration_patches/).
 - **[Hermes Agent](https://github.com/nousresearch/hermes-agent)** (Nous Research, MIT) — agente con memoria persistente, *skills* y gateway a mensajería (Telegram, etc.). El "asistente de bolsillo". Conversación, bucle agéntico y **búsqueda web soberana** (vía el SearXNG del stack, fijado con `web.search_backend`) verificados contra Gemma local.

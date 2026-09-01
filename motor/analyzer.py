@@ -249,7 +249,7 @@ CPU_BANDWIDTH_GBS = 50.0  # DDR5-5600 dual channel ~50 GB/s
 CPU_SPEED_FACTOR = 0.07   # ~10-20× más lento que GPU con Tensor Cores
 
 # Baselines para extrapolación de tiempos
-# (datos empíricos del proyecto motor-de-loras-custom)
+# (datos empíricos del proyecto lora-factory)
 _BENCHMARKS = [
     {   # Titanic 3B en GTX 1080 Ti
         "model_params_b": 3.0, "num_examples": 891, "avg_tokens": 85,

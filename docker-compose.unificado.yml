@@ -1,7 +1,7 @@
 # ===========================================================================
 # docker-compose.unificado.yml
 # ===========================================================================
-# Stack unificado: Motor de LoRAs + Odysseus
+# Stack unificado: LoRA Factory + Odysseus
 #
 # Servicios:
 #   odysseus       — workspace AI (chat, agentes, docs, memoria, email)

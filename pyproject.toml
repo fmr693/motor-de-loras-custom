@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "motor-de-loras"
 version = "0.1.0"
-description = "Motor de LoRAs — agente doméstico con ciclo de mejora continua"
+description = "LoRA Factory — agente doméstico con ciclo de mejora continua"
 requires-python = ">=3.10"
 
 # ── Dependencias base: solo lo necesario para DataDigestor + servidor ──────
