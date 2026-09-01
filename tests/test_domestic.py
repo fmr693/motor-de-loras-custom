@@ -71,8 +71,14 @@ class TestIsSafePath(unittest.TestCase):
         path = Path("C:/Windows/System32/evil.bat") if os.name == "nt" else Path("/etc/passwd")
         self.assertFalse(_is_safe_path(path))
 
-    def test_temp_dir_is_unsafe(self):
-        path = Path(tempfile.gettempdir()) / "test.txt"
+    def test_home_root_is_unsafe(self):
+        """El home a secas NO es raiz segura (solo sus subcarpetas conocidas).
+
+        Antes se usaba tempfile.gettempdir(), que solo es inseguro en Windows:
+        en Linux es /tmp, que domestic_tools marca como segura a proposito para
+        Docker. El test fallaba en CI desde entonces.
+        """
+        path = Path.home() / "_zona_no_segura" / "test.txt"
         self.assertFalse(_is_safe_path(path))
 
     def test_nonexistent_safe_path_still_allowed(self):
@@ -109,7 +115,7 @@ class TestFileOrganize(unittest.TestCase):
 
     def test_unsafe_dest_blocked(self):
         """Destino fuera de rutas seguras devuelve mensaje bloqueado."""
-        unsafe_dest = str(Path(tempfile.gettempdir()) / "unsafe")
+        unsafe_dest = str(Path.home() / "_zona_no_segura" / "unsafe")
         result = file_organize(["~/Desktop/algo.pdf"], unsafe_dest, dry_run=False)
         self.assertIn("[Bloqueado]", result)
 
@@ -153,7 +159,8 @@ class TestNoteSave(unittest.TestCase):
 
     def test_unsafe_folder_blocked(self):
         """Carpeta fuera de raíces seguras devuelve Bloqueado."""
-        result = note_save("título", "cuerpo", folder=str(tempfile.gettempdir()))
+        result = note_save("título", "cuerpo",
+                           folder=str(Path.home() / "_zona_no_segura"))
         self.assertIn("[Bloqueado]", result)
 
     def test_special_chars_in_title(self):
