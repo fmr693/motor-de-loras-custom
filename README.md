@@ -231,4 +231,4 @@ lora-factory/
 
 ---
 
-*Trabajo de Fin de Grado · 2026 · Licencia MIT. Estado y bitácora de desarrollo en [SESION.md](SESION.md).*
+*Trabajo de Fin de Grado · 2026 · Licencia [MIT](LICENSE).*
