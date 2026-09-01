@@ -156,7 +156,7 @@ class TestSanitizeObservation(unittest.TestCase):
 
     def test_observacion_con_llaves_simples_es_valida(self):
         """Llaves simples en output de tool son normales."""
-        self.assertIsNone(_sanitize_observation("C:/Users/Felipe/Desktop/"))
+        self.assertIsNone(_sanitize_observation("C:/Users/usuario/Desktop/"))
 
     def test_observacion_con_corchetes_es_valida(self):
         self.assertIsNone(_sanitize_observation("  factura.pdf  (1234 B)"))
@@ -199,11 +199,11 @@ class TestExtractJsonObject(unittest.TestCase):
         self.assertEqual(result, text)
 
     def test_json_con_escape_backslash(self):
-        text = '{"path": "C:\\\\Users\\\\Felipe"}'
+        text = '{"path": "C:\\\\Users\\\\usuario"}'
         result = _extract_json_object(text, 0)
         self.assertIsNotNone(result)
         parsed = json.loads(result)
-        self.assertIn("Felipe", parsed["path"])
+        self.assertIn("usuario", parsed["path"])
 
     def test_json_con_comillas_escapadas_en_string(self):
         text = '{"msg": "ella dijo \\"hola\\" ayer"}'

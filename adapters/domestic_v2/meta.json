@@ -1,6 +1,6 @@
 {
   "model_id": "Qwen/Qwen2.5-3B-Instruct",
-  "adapter_dir": "C:\\Users\\Felipe\\Desktop\\Proyecto\\motor-de-loras-custom\\adapters\\domestic_v2",
+  "adapter_dir": "adapters\\domestic_v2",
   "engine": "peft_trl",
   "lora_r": 16,
   "lora_alpha": 32,

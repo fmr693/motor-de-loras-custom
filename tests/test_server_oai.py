@@ -549,16 +549,16 @@ class TestGemmaToolParser:
         from motor.server import _parse_gemma_tool_calls
         text = (
             '<|tool_call>call:file_organize{'
-            'dest:<|"|>C:\\Users\\Felipe\\Temp\\Imagenes<|"|>,'
-            'files:[<|"|>C:\\Users\\Felipe\\Temp\\a.jpg<|"|>,'
-            '<|"|>C:\\Users\\Felipe\\Temp\\b.jpg<|"|>]}<tool_call|>'
+            'dest:<|"|>C:\\Users\\usuario\\Temp\\Imagenes<|"|>,'
+            'files:[<|"|>C:\\Users\\usuario\\Temp\\a.jpg<|"|>,'
+            '<|"|>C:\\Users\\usuario\\Temp\\b.jpg<|"|>]}<tool_call|>'
         )
         calls = _parse_gemma_tool_calls(text)
         args = json.loads(calls[0]["function"]["arguments"])
-        assert args["dest"] == "C:\\Users\\Felipe\\Temp\\Imagenes"
+        assert args["dest"] == "C:\\Users\\usuario\\Temp\\Imagenes"
         assert args["files"] == [
-            "C:\\Users\\Felipe\\Temp\\a.jpg",
-            "C:\\Users\\Felipe\\Temp\\b.jpg",
+            "C:\\Users\\usuario\\Temp\\a.jpg",
+            "C:\\Users\\usuario\\Temp\\b.jpg",
         ]
 
     def test_argumentos_no_parseables_se_entregan_crudos(self):

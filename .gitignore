@@ -76,3 +76,6 @@ presentacion/
 logs/*.log
 logs/watchdog.pausa
 _backups_motor/
+
+# Wrapper local del backup (contiene rutas de la maquina, no publicar)
+scripts/backup_activo.bat

@@ -17,15 +17,15 @@ python scripts/backup_activo.py
 
 # recomendado: incluir la memoria persistente y apuntar a la nube / otro disco
 python scripts/backup_activo.py \
-  --dest "C:/Users/Felipe/OneDrive/backups_motor" \
-  --memory-dir "C:/Users/Felipe/.claude/projects/c--Users-Felipe-Desktop-Proyecto-motor-de-loras-custom/memory"
+  --dest "C:/Users/<usuario>/OneDrive/backups_motor" \
+  --memory-dir "C:/Users/<usuario>/.claude/projects/<slug-del-proyecto>/memory"
 ```
 
 **Tarea programada semanal** (domingos 20:00):
 
 ```bat
 schtasks /Create /SC WEEKLY /D SUN /ST 20:00 /TN "MotorBackupActivo" ^
-  /TR "python \"C:\Users\Felipe\Desktop\Proyecto\motor-de-loras-custom\scripts\backup_activo.py\" --memory-dir \"C:\Users\Felipe\.claude\projects\c--Users-Felipe-Desktop-Proyecto-motor-de-loras-custom\memory\""
+  /TR "python \"C:\ruta\al\repo\scripts\backup_activo.py\" --memory-dir \"C:\Users\<usuario>\.claude\projects\<slug-del-proyecto>\memory\""
 ```
 
 Borrar: `schtasks /Delete /TN "MotorBackupActivo" /F`
@@ -95,7 +95,7 @@ posibles:
 
 ```powershell
 # A) sin admin — lanzar via conhost --headless (el que está aplicado)
-$s = "C:\Users\Felipe\Desktop\Proyecto\motor-de-loras-custom\scripts\docker_watchdog.ps1"
+$s = "C:\ruta\al\repo\scripts\docker_watchdog.ps1"
 $a = New-ScheduledTaskAction -Execute "conhost.exe" `
      -Argument "--headless powershell.exe -ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File `"$s`""
 Set-ScheduledTask -TaskName "MotorDockerWatchdog" -Action $a
@@ -109,7 +109,7 @@ Set-ScheduledTask -TaskName "MotorDockerWatchdog" -Principal $p
 
 ```bat
 schtasks /Create /SC MINUTE /MO 5 /TN "MotorDockerWatchdog" ^
-  /TR "powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File \"C:\Users\Felipe\Desktop\Proyecto\motor-de-loras-custom\scripts\docker_watchdog.ps1\""
+  /TR "powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File \"C:\ruta\al\repo\scripts\docker_watchdog.ps1\""
 ```
 
 Borrar: `schtasks /Delete /TN "MotorDockerWatchdog" /F`
