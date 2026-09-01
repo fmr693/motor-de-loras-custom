@@ -7,7 +7,7 @@
 **Resultado que lo demuestra:** partiendo de datos crudos, la fábrica produjo un adapter de 50 MB sobre un modelo de 2B que **supera en 11 puntos de F1 a un ensemble de 6 modelos** en el mismo holdout intocado, y queda a 4 centésimas de un anotador humano ([detalle y metodología](#resultados-medibles)).
 
 **Origen:** pipeline EXIST 2025 (detección de sexismo en memes) generalizado a una fábrica reutilizable.
-**Estado:** 674 tests · 0 fallos · 15 comandos CLI · Docker (CPU y GPU) · modelo base actual **Gemma 4 12B** a ~50 tok/s en RTX 4080 · contexto configurable hasta 64K (caché KV cuantizable) · RAG verificado · **visión** (imágenes vía mmproj, perfil multimodal) · aprendizaje híbrido (feedback humano + reflexión) · Digestor multi-modo (clasificar/destilar/conocimiento/VLM) con router `--mode auto` en el CLI · compatible con frontends agénticos (Odysseus y Hermes).
+**Estado:** 674 tests · 0 fallos · 8 omitidos (dependencias opcionales) · 15 comandos CLI · Docker (CPU y GPU) · modelo base actual **Gemma 4 12B** a ~50 tok/s en RTX 4080 · contexto configurable hasta 64K (caché KV cuantizable) · RAG verificado · **visión** (imágenes vía mmproj, perfil multimodal) · aprendizaje híbrido (feedback humano + reflexión) · Digestor multi-modo (clasificar/destilar/conocimiento/VLM) con router `--mode auto` en el CLI · compatible con frontends agénticos (Odysseus y Hermes).
 
 ---
 
@@ -183,7 +183,10 @@ El servidor expone una API estilo OpenAI, así que **cualquier frontend compatib
 
 ## Tests
 
-674 tests · 0 fallos · tres capas (unitaria, integración E2E, comportamiento).
+674 tests · 0 fallos · 8 omitidos · tres capas (unitaria, integración E2E, comportamiento).
+
+Los 8 omitidos dependen del entorno (`python-docx`, `beautifulsoup4`, un GGUF de
+referencia local): no son fallos, pero tampoco se ejecutan en una máquina limpia.
 
 ```bash
 PYTHONUTF8=1 python -m pytest tests/ -q       # suite completa
