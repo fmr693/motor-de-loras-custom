@@ -26,7 +26,7 @@ from motor.digestor import DataDigestor
 # ---------------------------------------------------------------------------
 
 PROFILE_ES = {
-    "name":         "Felipe",
+    "name":         "Marta",
     "work_dirs":    ["~/Desktop/Proyecto_V3", "~/Documentos/Trabajo"],
     "notes_folder": "~/Notas",
     "contacts":     {"jefe": "jefe@empresa.com", "equipo": "equipo@empresa.com"},
@@ -192,7 +192,7 @@ class TestFromUserProfile:
             m["content"] for ex in d._examples
             for m in ex["messages"] if m["role"] == "system"
         ]
-        assert all("Felipe" in c for c in system_contents)
+        assert all("Marta" in c for c in system_contents)
 
     def test_seed_reproducible(self, tmp_path):
         """Mismo seed → mismos ejemplos."""

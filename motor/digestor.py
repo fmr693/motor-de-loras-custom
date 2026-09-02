@@ -4264,7 +4264,7 @@ learning_rate: 2e-4
         .. code-block:: json
 
             {
-              "name":         "Felipe",
+              "name":         "Marta",
               "work_dirs":    ["~/Desktop/Proyecto_V3", "~/Documentos/Trabajo"],
               "notes_folder": "~/Notas",
               "contacts":     {"jefe": "jefe@empresa.com", "equipo": "equipo@empresa.com"},

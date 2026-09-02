@@ -628,7 +628,7 @@ class ContinualLearner:
         Estructura del perfil
         ---------------------
         {
-            "name": "Felipe",
+            "name": "Marta",
             "language": "es",
             "folders": {
                 "documents": "~/Documentos",

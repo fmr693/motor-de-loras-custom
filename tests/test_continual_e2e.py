@@ -821,7 +821,7 @@ class TestFromUserProfile(unittest.TestCase):
         self.reg   = Path(self.tmp) / "registry.json"
         _make_adapter(self.base, eval_loss=0.08)
         self.profile = {
-            "name": "Felipe",
+            "name": "Marta",
             "language": "es",
             "folders": {
                 "documents": "~/Documentos",
@@ -947,7 +947,7 @@ class TestFromUserProfile(unittest.TestCase):
         try:
             self.assertTrue(profile_path.exists())
             saved = json.loads(profile_path.read_text(encoding="utf-8"))
-            self.assertEqual(saved["name"], "Felipe")
+            self.assertEqual(saved["name"], "Marta")
             self.assertEqual(saved["language"], "es")
         except OSError as e:
             if getattr(e, 'winerror', 0) == 6714:
