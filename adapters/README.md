@@ -25,16 +25,19 @@ proyecto y la licencia MIT del repositorio **no les aplica**.
 
 | Adaptador | Modelo base | Licencia declarada por el modelo base |
 |---|---|---|
-| `domestic_7b` | [`Qwen/Qwen2.5-7B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct) | Apache 2.0 |
-| `finance_sentiment_14b` | [`Qwen/Qwen2.5-14B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-14B-Instruct) | Apache 2.0 |
-| `domestic_base` | [`Qwen/Qwen2.5-3B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct) | **Qwen Research License** — no es Apache 2.0 |
-| `domestic_v2` | [`Qwen/Qwen2.5-3B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct) | **Qwen Research License** — no es Apache 2.0 |
+| `domestic_7b` | [`Qwen/Qwen2.5-7B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct) | `apache-2.0` |
+| `finance_sentiment_14b` | [`Qwen/Qwen2.5-14B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-14B-Instruct) | `apache-2.0` |
+| `domestic_base` | [`Qwen/Qwen2.5-3B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct) | **`qwen-research`** — no es Apache 2.0 |
+| `domestic_v2` | [`Qwen/Qwen2.5-3B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct) | **`qwen-research`** — no es Apache 2.0 |
 
-> **Aviso.** La familia Qwen2.5 es Apache 2.0 **salvo** las variantes 3B y 72B, que
-> se publican bajo licencias propias. La 3B usa la *Qwen Research License*, que
-> restringe el uso comercial. Afecta a `domestic_base` y `domestic_v2`, y por
-> herencia a los adaptadores entrenados sobre ellos. La referencia válida es
-> siempre el fichero `LICENSE` de la tarjeta del modelo en Hugging Face.
+> **Aviso.** La familia Qwen2.5 es `apache-2.0` **salvo** las variantes 3B y 72B, que
+> se publican bajo licencias propias. La 3B usa `qwen-research`, que **restringe el uso
+> comercial**. Afecta a `domestic_base` y `domestic_v2`, y por herencia a los
+> adaptadores entrenados sobre ellos.
+>
+> Los tres identificadores se verificaron contra las tarjetas de modelo en Hugging
+> Face el **1 de septiembre de 2026**. La referencia válida sigue siendo la tarjeta
+> del modelo, que su autor puede cambiar.
 
 Un adaptador LoRA no contiene pesos del modelo base, pero solo tiene sentido
 aplicado sobre él: las condiciones del modelo base gobiernan su uso.
