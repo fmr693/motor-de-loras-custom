@@ -109,7 +109,8 @@ fabrica_loras digestor   --mode auto      --data ./entrada/ --output ds.jsonl   
 fabrica_loras digestor   --mode vlm --manifest memes.jsonl --label-map "1:YES,0:NO" \
                          --prompt-template "Texto: «{text}»\n¿Sexista? YES/NO." --split train --output train.jsonl  # VLM
 fabrica_loras analyzer   --model google/gemma-4-12B-it
-fabrica_loras train      --model google/... --data dataset.jsonl --output adapters/mi_adapter/
+fabrica_loras train      --model google/... --data dataset.jsonl --output adapters/mi_adapter/  # detecta LLM o VLM
+fabrica_loras trainer    --model google/... --data dataset.jsonl --output ...        # fuerza la ruta LLM
 fabrica_loras vlm        --model Qwen/Qwen2-VL-2B --data ... --output ...
 fabrica_loras export     --adapter ... --output ... [--format gguf]
 fabrica_loras chat       --model adapters/... [--base-model ...]
@@ -149,7 +150,7 @@ python fabrica_loras.py serve --model modelos/<tu_modelo>.gguf --host 0.0.0.0 --
 # Stack producción (CPU)
 docker compose up -d
 
-# Stack unificado con Odysseus (6 servicios)
+# Stack unificado con Odysseus (9 servicios)
 docker compose -f docker-compose.unificado.yml up -d
 
 # Servir en GPU (RTX 4080) — texto, 64K (el driver diario)
@@ -200,18 +201,22 @@ python _run_tests.py --dev                     # solo lo que no necesita GPU
 ```
 lora-factory/
 ├── fabrica_loras.py            CLI (15 comandos)
+├── _run_tests.py               runner de la suite (modo --dev, sin GPU)
 ├── motor/                      20 módulos (ver tabla)
 ├── tests/                      suites pytest + harnesses E2E en vivo
+├── adapters/                   adapters entrenados + tokenizer del modelo base
+├── datasets/                   datasets de entrenamiento versionados
+├── config/                     configuración de servicios del stack (SearXNG)
 ├── scripts/                    operación: backup, watchdog de Docker, chequeo del activo
-├── presentacion/               presentaciones HTML (defensa, etc.)
 ├── integration_patches/        parches al submódulo Odysseus
 ├── odysseus/                   submódulo (apexEvan/odysseus)
+├── .github/workflows/          CI: suite completa en cada push
 ├── Dockerfile.serve / .serve-gpu / .train
 ├── docker-compose.yml / docker-compose.unificado.yml
 ├── pyproject.toml
-├── README.md / SESION.md       documentación pública / memoria de desarrollo
-├── PRUEBAS_ESTRES.md           bitácora de 5 rondas de estrés + rumbo del proyecto
-└── legacy/                     histórico (EXIST 2025, backups)
+├── LICENSE                     MIT
+├── README.md                   documentación pública
+└── PRUEBAS_ESTRES.md           bitácora de 5 rondas de estrés + rumbo del proyecto
 ```
 
 > **Operación** (`scripts/`, ver [`scripts/README_scripts.md`](scripts/README_scripts.md)):
